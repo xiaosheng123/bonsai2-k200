@@ -47,7 +47,7 @@
 
 ### 驱动下载
 
-K200 驱动和 SDK（380MB，包含 XTDK/XTCL/clang++ 工具链）：
+K200 驱动和 SDK（380MB，**CentOS 专用版**，包含 XTDK/XTCL/clang++ 工具链）：
 
 **夸克网盘**：`/~d0fe3bEVWG~/`  
 **链接**：https://pan.quark.cn/s/3a97917a8c23
