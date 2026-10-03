@@ -1,0 +1,18 @@
+{
+  "generated": true,
+  "danger_mode": false,
+  "rows": [
+    {"id":"P1","size":1024,"usable":false,"ms":0.0000,"relrms":inf,"maxabs":-1,"note":"r=0 wait=0 f16位型差异=1个/1024 (首个 idx=1: 卡=0x0000 主机=0x8000)"},
+    {"id":"P1","size":65536,"usable":false,"ms":0.0000,"relrms":inf,"maxabs":-1,"note":"r=0 wait=0 f16位型差异=1个/65536 (首个 idx=1: 卡=0x0000 主机=0x8000)"},
+    {"id":"P1","size":1048576,"usable":false,"ms":0.0000,"relrms":inf,"maxabs":-1,"note":"r=0 wait=0 f16位型差异=1个/1048576 (首个 idx=1: 卡=0x0000 主机=0x8000)"},
+    {"id":"P2a","size":0,"usable":false,"ms":0.0000,"relrms":-1,"maxabs":-1,"note":"★ 四种 (TransA,TransB) 组合【无一】等于 A*B => 语义判不出 => 弃用该算子"},
+    {"id":"P2b","size":64,"usable":true,"ms":0.0000,"relrms":0,"maxabs":-1,"note":"r(ldb=1024)=0 r(ldb=K)=0 wait=0 | 与连续版 relrms=0% | vs fp64 主机 relrms=0.00452393% => ★ ldb 非连续【支持】"},
+    {"id":"P2b","size":512,"usable":true,"ms":0.0000,"relrms":0,"maxabs":-1,"note":"r(ldb=1024)=0 r(ldb=K)=0 wait=0 | 与连续版 relrms=0% | vs fp64 主机 relrms=0.00621057% => ★ ldb 非连续【支持】"},
+    {"id":"P2b","size":4096,"usable":true,"ms":0.0000,"relrms":0,"maxabs":-1,"note":"r(ldb=1024)=0 r(ldb=K)=0 wait=0 | 与连续版 relrms=0% | vs fp64 主机 relrms=0.00638912% => ★ ldb 非连续【支持】"},
+    {"id":"P2c","size":0,"usable":true,"ms":0.0000,"relrms":-1,"maxabs":-1,"note":"nullptr max 指针: r=0 wait=0 res_max=-1"},
+    {"id":"P2d","size":0,"usable":true,"ms":0.0000,"relrms":-1,"maxabs":-1,"note":"信息性: 两种输出已打表, 人工判是否标准因果掩码; 我们【不依赖】它"},
+    {"id":"P2c","size":0,"usable":true,"ms":0.0000,"relrms":-1,"maxabs":-1,"note":"nullptr max 指针: r=0 wait=0 res_max=-1"},
+    {"id":"P2f","size":64,"usable":false,"ms":0.0000,"relrms":98.0524,"maxabs":-1,"note":"r=0 wait=0 | vs fp64 主机 relrms=98.0524% ★ >1e-3 精度不足"},
+    {"id":"P2f","size":512,"usable":false,"ms":0.0000,"relrms":142.246,"maxabs":-1,"note":"r=3 wait=0 | vs fp64 主机 relrms=142.246% ★ >1e-3 精度不足"}
+  ]
+}

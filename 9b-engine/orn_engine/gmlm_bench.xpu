@@ -1,0 +1,53 @@
+// gmlm_bench.xpu — GM2LM 固定延迟 vs 大小基准
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+#include <chrono>
+
+__global__ void gm2lm_bench(float *src, float *dst, int loops, int bytes) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    int tid = cl * 16 + cid;
+    __local__ float buf[16384];  // 64KB max
+    float *d = dst + (size_t)tid * 16384;
+    for (int it = 0; it < loops; it++) {
+        GM2LM(src + (size_t)tid * 16384, buf, bytes);
+        // 防止优化: 累加一点
+        float s = 0;
+        for (int i = 0; i < bytes/4; i += 4) s += buf[i];
+        LM2GM(&s, d + it, 4);
+    }
+}
+
+extern "C" __attribute__((visibility("default")))
+void run_gm2lm_bench(int clusters, int cores, int loops, int bytes,
+                     float *src, float *dst) {
+    gm2lm_bench<<<clusters, cores>>>(src, dst, loops, bytes);
+}
+
+int main(int argc, char **argv) {
+    int loops = 100;
+    int sizes[] = {1024, 4096, 16384, 65536};
+    for (int b : sizes) {
+        float *d_src = nullptr, *d_dst = nullptr;
+        xpu_malloc((void**)&d_src, 16*8*16384*4);
+        xpu_malloc((void**)&d_dst, 16*8*16384*4);
+        std::vector<float> h(16*8*16384);
+        xpu_memcpy(d_src, h.data(), h.size()*4, XPU_HOST_TO_DEVICE);
+        xpu_wait();
+        auto t0 = std::chrono::steady_clock::now();
+        run_gm2lm_bench(8, 16, loops, b, d_src, d_dst);
+        xpu_wait();
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double,std::milli>(t1-t0).count();
+        printf("GM2LM %6d B x %d loops (128 cores): %.3f ms => %.1f us/call\n",
+               b, loops, ms, ms*1000/loops);
+        xpu_free(d_src); xpu_free(d_dst);
+    }
+    return 0;
+}

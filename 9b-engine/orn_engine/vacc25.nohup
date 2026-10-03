@@ -1,0 +1,41 @@
+=== vacc25 开始 2026-09-22 14:59:57 ===
+########## 1) 512² 文字图 img_text (K200) ##########
+图 = /home/caden/ornc/mmtests/img_text.png
+问 = 图中写的文字是什么？请只回答文字内容。
+答原文 = 'K2CO'
+k200 = {"gen_secs": 7.17, "wall_secs": 7.17, "vision_tokens": [256], "image_encode": "[vis] 完成: 256 token, 总耗时 5.72s (gemm 3.42s, host 0.80s)", "tok_per_s": 0.4183, "prompt_chars": 3446, "nothink": true, "sid": "618d877db0046fb6", "prompt_tokens": 281, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=281 tok 用时 6.90s (24.6 ms/tok, 全量 复用0 tok) | 生成 3 tok 用时 0.19s = 15.479 tok/s | gemv 392 次"}
+usage = {"prompt_tokens": 281, "completion_tokens": 3, "total_tokens": 284}
+墙钟 15.25s
+########## 2) 512² 图形/颜色 img_shapes ##########
+图 = /home/caden/ornc/mmtests/img_shapes.png
+问 = 图里有什么？用中文简短回答，说出形状和颜色。
+答原文 = '图中有三个基本几何图形：\n\n- 左上角：一个**红色圆形**\n- 右上角：一个**绿色正方形**\n- 下方：一个**蓝色三角形**\n\n背景为白色。'
+k200 = {"gen_secs": 10.36, "wall_secs": 10.36, "vision_tokens": [256], "image_encode": "[vis] 完成: 256 token, 总耗时 5.68s (gemm 6.80s, host 1.57s)", "tok_per_s": 4.0542, "prompt_chars": 3449, "nothink": true, "sid": "2680a8c255130810", "prompt_tokens": 284, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=284 tok 用时 7.67s (27.0 ms/tok, 全量 复用0 tok) | 生成 42 tok 用时 2.66s = 15.769 tok/s | gemv 5815 次"}
+usage = {"prompt_tokens": 284, "completion_tokens": 42, "total_tokens": 326}
+墙钟 16.07s
+########## 3) ★768² 表格图 big_table (逐格读数, 期望 9/9) ##########
+图 = /home/caden/ornc/mmtests/big_table.png
+问 = 这张图是一个表格，请逐行说出每一格的字符。
+答原文 = '让我仔细观察这个表格中的字符。\n\n这个表格是 3×3 的网格，包含数学表达式。让我逐行读取：\n\n**第一行：**\n- 左上格：**A**\n- 中上格：**1**\n- 右上格：**7**\n\n**第二行：**\n- 左中格：**B**\n- 中中格：**2**\n- 右中格：**C**（这个看起来像字母 C，是一个半圆弧）\n\n**第三行：**\n- 左下格：**C**\n- 中下格：**3**\n- 右下格：**D**\n\n所以逐行读取的结果是：\n\n| 第一行 | A | 1 | 7 |\n|--------|---|---|---|\n| 第二行 | B | 2 | C |\n| 第三行 | C | 3 | D |\n\n需要说明的是，由于图像分辨率和字符渲染的原因，字母 C 和数字 1、7 的显示可能略有差异，但根据字符的形状特征，我判断它们分别是字母 C 和数字 1、7。'
+k200 = {"gen_secs": 36.96, "wall_secs": 38.22, "vision_tokens": [576], "image_encode": "[vis] 完成: 576 token, 总耗时 12.75s (gemm 9.77s, host 1.88s)", "tok_per_s": 6.4671, "prompt_chars": 7608, "nothink": true, "sid": "8943d229b19a1967", "prompt_tokens": 603, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=603 tok 用时 18.05s (29.9 ms/tok, 全量 复用0 tok) | 生成 239 tok 用时 18.88s = 12.656 tok/s | gemv 39494 次"}
+usage = {"prompt_tokens": 603, "completion_tokens": 239, "total_tokens": 842}
+墙钟 51.01s
+########## 4) 768² 图形/颜色 big_shapes ##########
+图 = /home/caden/ornc/mmtests/big_shapes.png
+问 = 图里有什么？用中文简短回答，说出形状和颜色。
+答原文 = '图里有三个基本图形：\n\n- 🔴 **红色圆形**（在左上角）\n- 🟩 **绿色正方形**（在右上角）\n- 🔷 **蓝色三角形**（在下方中间）\n\n简单说就是：一个红圆、一个绿方、一个蓝三角。'
+k200 = {"gen_secs": 22.31, "wall_secs": 22.31, "vision_tokens": [576], "image_encode": "[vis] 完成: 576 token, 总耗时 12.71s (gemm 12.74s, host 2.21s)", "tok_per_s": 2.7788, "prompt_chars": 7609, "nothink": true, "sid": "2680a8c255130810", "prompt_tokens": 604, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=604 tok 用时 17.59s (29.1 ms/tok, 全量 复用0 tok) | 生成 62 tok 用时 4.70s = 13.198 tok/s | gemv 47502 次"}
+usage = {"prompt_tokens": 604, "completion_tokens": 62, "total_tokens": 666}
+墙钟 35.06s
+########## 5) 768² 文字图 big_text (K200) ##########
+图 = /home/caden/ornc/mmtests/big_text.png
+问 = 图中写的文字是什么？请只回答文字内容。
+答原文 = 'K20'
+k200 = {"gen_secs": 17.88, "wall_secs": 17.88, "vision_tokens": [576], "image_encode": "[vis] 完成: 576 token, 总耗时 12.78s (gemm 15.68s, host 2.52s)", "tok_per_s": 0.1678, "prompt_chars": 7606, "nothink": true, "sid": "618d877db0046fb6", "prompt_tokens": 601, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=601 tok 用时 17.60s (29.3 ms/tok, 全量 复用0 tok) | 生成 3 tok 用时 0.25s = 12.241 tok/s | gemv 47899 次"}
+usage = {"prompt_tokens": 601, "completion_tokens": 3, "total_tokens": 604}
+墙钟 30.70s
+########## 6) 文本回归 6 条 (含黄金题「你好」) ##########
+[64 tok, 4.5s, 14.176 tok/s, server_k200={'gen_secs': 4.51, 'wall_secs': 4.51, 'vision_tokens': [], 'image_encode': '[vis] 完成: 576 token, 总耗时 12.78s (gemm 15.68s, host 2.52s)', 'tok_per_s': 14.1809, 'prompt_chars': 90, 'nothink': True, 'sid': 'ae149d8602c97037', 'prompt_tokens': 26, 'prefill_reused_tokens': 0, 'engine_prefill': '[orn] prompt=26 tok 用时 0.64s (24.8 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.84s = 16.645 tok/s | gemv 81315 次'}]
+
+=== 完成: 6/6 条拿到非空回复 2026-09-22 15:02:45 ===
+=== vacc25 done 2026-09-22 15:02:45 ===

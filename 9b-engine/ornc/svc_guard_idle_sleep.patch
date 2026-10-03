@@ -1,0 +1,7 @@
+--- svc_guard.sh.orig	2026-09-22 17:03:00.000000000 +0000
++++ svc_guard.sh	2026-09-23 00:20:00.000000000 +0000
+@@ -3,6 +3,9 @@
+ LOG=/home/caden/ornc/svc_guard.log
++# ★ 第28章: 空闲休眠期间(有标记)不自动拉起 —— 否则 */5 的守卫会把刚睡下的服务叫醒
++[ -f /home/caden/ornc/.idle_asleep ] && { echo "$(date '+%F %T') 睡眠标记存在 => 不自动拉起" >> "$LOG"; exit 0; }
+ H=$(curl -s --max-time 6 http://127.0.0.1:8090/health 2>/dev/null)

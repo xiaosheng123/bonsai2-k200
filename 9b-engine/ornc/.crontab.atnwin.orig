@@ -1,0 +1,2 @@
+#AGENT32# @reboot /bin/bash /home/caden/ornc/autostart.sh >/dev/null 2>&1
+#AGENT32# #AGENT32# */5 * * * * /bin/bash /home/caden/ornc/svc_guard.sh

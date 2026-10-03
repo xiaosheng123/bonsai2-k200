@@ -1,0 +1,90 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define HW_CORE 16
+#define TID (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define NT  (cluster_num() * HW_CORE)
+
+// A) 纯字节读 local: sum
+__global__ void a_k(const unsigned char *W, int R, float *out) {
+    int tid = TID;
+    __local__ unsigned char row[4096];
+    GM2LM(W, row, 4096);
+    int s = 0;
+    for (int r = 0; r < R; r++) for (int i = 0; i < 4096; i++) s += row[i];
+    out[tid] = (float)s;
+}
+void run_a(const void *W, int R, void *o, int cl, int co) { a_k<<<cl, co>>>((const unsigned char *)W, R, (float *)o); }
+
+// B) 纯 int32 读 local
+__global__ void b_k(const unsigned char *W, int R, float *out) {
+    int tid = TID;
+    __local__ unsigned char row[4096];
+    GM2LM(W, row, 4096);
+    const int *p = (const int *)row;
+    int s = 0;
+    for (int r = 0; r < R; r++) for (int i = 0; i < 1024; i++) s += p[i];
+    out[tid] = (float)s;
+}
+void run_b(const void *W, int R, void *o, int cl, int co) { b_k<<<cl, co>>>((const unsigned char *)W, R, (float *)o); }
+
+// D) V2 MAC, 数据全在 __local__ (对照)
+__global__ void d_k(const unsigned char *W, const unsigned char *X, int R, float *out) {
+    int tid = TID;
+    __local__ unsigned char row[4352];
+    __local__ unsigned char lx[4096];
+    GM2LM(W, row, 4352);
+    GM2LM(X, lx, 4096);
+    const int *qp = (const int *)(row + 256);
+    const int *q = (const int *)lx;
+    float a = 0;
+    for (int r = 0; r < R; r++) {
+        int s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int b = 0; b < 128; b++) {
+            const int *p = qp + b * 8, *qq = q + b * 8;
+            for (int i = 0; i < 8; i += 2) {
+                int A0 = p[i], A1 = p[i + 1], B0 = qq[i], B1 = qq[i + 1];
+                s0 += (A0 << 24 >> 24) * (B0 << 24 >> 24);
+                s1 += (A0 << 16 >> 24) * (B0 << 16 >> 24);
+                s2 += (A0 << 8 >> 24) * (B0 << 8 >> 24);
+                s3 += (A0 >> 24) * (B0 >> 24);
+                s0 += (A1 << 24 >> 24) * (B1 << 24 >> 24);
+                s1 += (A1 << 16 >> 24) * (B1 << 16 >> 24);
+                s2 += (A1 << 8 >> 24) * (B1 << 8 >> 24);
+                s3 += (A1 >> 24) * (B1 >> 24);
+            }
+        }
+        a += (float)(s0 + s1 + s2 + s3);
+    }
+    out[tid] = a;
+}
+void run_d(const void *W, const void *X, int R, void *o, int cl, int co) { d_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)X, R, (float *)o); }
+
+// E) 全局内存直读 MAC (x 和 W 都从 global 读, 靠 cache)
+__global__ void e_k(const unsigned char *W, const unsigned char *X, int R, float *out) {
+    int tid = TID;
+    const int *qp = (const int *)(W + 256);
+    const int *q = (const int *)X;
+    float a = 0;
+    for (int r = 0; r < R; r++) {
+        int s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int b = 0; b < 128; b++) {
+            const int *p = qp + b * 8, *qq = q + b * 8;
+            for (int i = 0; i < 8; i += 2) {
+                int A0 = p[i], A1 = p[i + 1], B0 = qq[i], B1 = qq[i + 1];
+                s0 += (A0 << 24 >> 24) * (B0 << 24 >> 24);
+                s1 += (A0 << 16 >> 24) * (B0 << 16 >> 24);
+                s2 += (A0 << 8 >> 24) * (B0 << 8 >> 24);
+                s3 += (A0 >> 24) * (B0 >> 24);
+                s0 += (A1 << 24 >> 24) * (B1 << 24 >> 24);
+                s1 += (A1 << 16 >> 24) * (B1 << 16 >> 24);
+                s2 += (A1 << 8 >> 24) * (B1 << 8 >> 24);
+                s3 += (A1 >> 24) * (B1 >> 24);
+            }
+        }
+        a += (float)(s0 + s1 + s2 + s3);
+    }
+    out[tid] = a;
+}
+void run_e(const void *W, const void *X, int R, void *o, int cl, int co) { e_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)X, R, (float *)o); }

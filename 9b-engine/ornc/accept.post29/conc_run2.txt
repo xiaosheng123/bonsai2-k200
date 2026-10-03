@@ -1,0 +1,54 @@
+=== cb_conc 开始 2026-09-23 08:21:16  并发口=8091 solo口=8090 ===
+A1  单独: 你好                         9 tok   0.53s sha=bb3f31771d2996de fp=★ GEN 9 tok ids=c0fd17ebd3dc35a6 bytes=316cbcaccf26db84 prom
+A2  单独: 1+1等于几                    36 tok   2.73s sha=99a42586b9339e0e fp=★ GEN 36 tok ids=d4b3e3dadd2dbe69 bytes=ed8708791cf71980 pro
+A3  单独: 用三句话解释什么是光合作用             64 tok   4.52s sha=bfc252f2e0af8b85 fp=★ GEN 64 tok ids=c88842f50f6c88b6 bytes=e471681caee48c05 pro
+A4  单独: 把“今天天气不错，我们出去走走吧”翻译成英文    64 tok   4.50s sha=5cd4c2c3600aa47e fp=★ GEN 64 tok ids=08dd52652d103b88 bytes=581f1862e92e39f3 pro
+A5  单独: 写一个Python函数输入整数列表返回最大值    64 tok   4.72s sha=7bfa9d3ba3ec3045 fp=★ GEN 64 tok ids=67b86f2fb8eab449 bytes=065a609ed716efcf pro
+A6  单独: 我明天要交一份季度税务报告，列5条检查清单     64 tok   4.52s sha=05c303f9e7337801 fp=★ GEN 64 tok ids=b0b2986b391e2032 bytes=1fccd86823413058 pro
+
+B 段: 6 条同时发, 整批墙钟 15.21s
+B1  并发: 你好                         9 tok   3.87s sha=bb3f31771d2996de ✓  fp相同=True
+B2  并发: 1+1等于几                    46 tok   9.35s sha=ac3130908db72c36 ✗串味!!  fp相同=False
+B3  并发: 用三句话解释什么是光合作用             64 tok  12.21s sha=956e30402bedae21 ✗串味!!  fp相同=False
+B4  并发: 把“今天天气不错，我们出去走走吧”翻译成英文    64 tok  12.21s sha=bcb9bbd057d7c861 ✗串味!!  fp相同=False
+B5  并发: 写一个Python函数输入整数列表返回最大值    64 tok  12.87s sha=7bfa9d3ba3ec3045 ✓  fp相同=True
+B6  并发: 我明天要交一份季度税务报告，列5条检查清单     64 tok  15.20s sha=a3dd86cbf9ed1fb8 ✗串味!!  fp相同=False
+
+C 段: 4 条并发 (恰满 4 槽), 整批墙钟 8.66s
+C1  你好                       sha=bb3f31771d2996de ✓
+C2  1+1等于几                   sha=c11726376e6a6c2f ✗
+C3  用三句话解释什么是光合作用            sha=89160929271b429d ✗
+C4  把“今天天气不错，我们出去走走吧”翻译成英文   sha=96cdb8a7908893bd ✗
+
+D 段: 6 条并发 (>4 槽, 排队语义), 整批墙钟 15.54s
+D1  你好                       sha=bb3f31771d2996de ✓  solo字段=0
+D2  1+1等于几                   sha=53590afd26f10434 ✗  solo字段=0
+D3  用三句话解释什么是光合作用            sha=0312b9f39b59011c ✗  solo字段=0
+D4  把“今天天气不错，我们出去走走吧”翻译成英文   sha=cd514265e199f48d ✗  solo字段=0
+D5  写一个Python函数输入整数列表返回最大值   sha=203f7bfee7aa96cd ✗  solo字段=0
+D6  我明天要交一份季度税务报告，列5条检查清单    sha=2542b0d1097fefba ✗  solo字段=0
+
+E 段: solo 口(8090) 4 条并发, 墙钟 12.95s
+E1  你好                       sha=bb3f31771d2996de ✓ solo=1
+E2  1+1等于几                   sha=99a42586b9339e0e ✓ solo=1
+E3  用三句话解释什么是光合作用            sha=bfc252f2e0af8b85 ✓ solo=1
+E4  把“今天天气不错，我们出去走走吧”翻译成英文   sha=5cd4c2c3600aa47e ✓ solo=1
+
+=== 结论: 有 16 项失败 ✗ ===
+   ✗ B2 回答不同: 单独='1+1 等于 **2**。\n\n这是一个最基本的加法运算：\n- 1 + 1 = 2\n\n如果你有其他数学问题，我很乐意帮你解' 并发='1+1 等于 **2**。\n\n这是一个最基本的数学运算，把 1 和 1 相加，结果就是 2。😊\n\n如果你有其他数学问题，'
+   ✗ B2 指纹不同: ★ GEN 36 tok ids=d4b3e3dadd2dbe69 bytes=ed8708791cf71980 prompt=4ff5e7c44b1133d6(17 tok) vs ★ GEN 46 tok ids=2c1abcdf51c55d5b bytes=bce591b7771cc5f4 prompt=4ff5e7c44b1133d6(17 tok)
+   ✗ B3 回答不同: 单独='光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生' 并发='光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生'
+   ✗ B3 指纹不同: ★ GEN 64 tok ids=c88842f50f6c88b6 bytes=e471681caee48c05 prompt=53a03e5c3c294bf8(18 tok) vs ★ GEN 64 tok ids=940ed49bea63a3ad bytes=13461a70bbdf6f07 prompt=53a03e5c3c294bf8(18 tok)
+   ✗ B4 回答不同: 单独='# 翻译\n\n**"The weather is nice today, let\'s go out for a walk.' 并发='# 翻译\n\n**"The weather is nice today, let\'s go out for a walk.'
+   ✗ B4 指纹不同: ★ GEN 64 tok ids=08dd52652d103b88 bytes=581f1862e92e39f3 prompt=6414dcee3c5571af(25 tok) vs ★ GEN 64 tok ids=2ca43ece4acd1697 bytes=e893b656d306575a prompt=6414dcee3c5571af(25 tok)
+   ✗ B6 回答不同: 单独='# 季度税务报告检查清单\n\n以下是5条关键的检查清单，帮助你确保季度税务报告准确无误：\n\n## 1. 收入数据核对\n- ' 并发='# 季度税务报告检查清单\n\n以下是5条关键检查项，帮助你确保报告准确完整：\n\n## 1. 收入数据核对\n- 确认所有季度'
+   ✗ B6 指纹不同: ★ GEN 64 tok ids=b0b2986b391e2032 bytes=1fccd86823413058 prompt=61ca91d167bde5ef(26 tok) vs ★ GEN 64 tok ids=54bc6d587d673afb bytes=0a160ab4409deca9 prompt=61ca91d167bde5ef(26 tok)
+   ✗ C2 回答不同
+   ✗ C3 回答不同
+   ✗ C4 回答不同
+   ✗ D2 回答不同 (排队路径)
+   ✗ D3 回答不同 (排队路径)
+   ✗ D4 回答不同 (排队路径)
+   ✗ D5 回答不同 (排队路径)
+   ✗ D6 回答不同 (排队路径)
+写入 /home/caden/ornc/accept.post29/conc.json

@@ -1,0 +1,10 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+__global__ void lmu_k(float *o) {
+    __local__ unsigned char buf[65536];
+    for (int i = 0; i < 65536; i++) buf[i] = (unsigned char)(i * 7 + 1);
+    int s = 0;
+    for (int i = 0; i < 65536; i += 64) s += (int)buf[i];
+    __local__ int l[1]; l[0] = s;
+    LM2GM(l, o, 4);
+}

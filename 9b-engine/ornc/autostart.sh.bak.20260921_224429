@@ -1,0 +1,46 @@
+#!/bin/bash
+# autostart.sh — 开机自拉起 8090 服务 (这台 VM 会被人重启, 服务必须自己回来)
+# 纪律: 只做"检查 + 启动"。状态不对就记日志退出, 绝不 soft_reset、绝不重试刷屏。
+# v2 (2026-09-21): 默认拉起提速版 (orn3 + serve2.py); 老版 start.sh/serve.py/orn 保留做回退。
+LOG=/home/caden/ornc/autostart.log
+say() { echo "[autostart $(date '+%F %T')] $*" >> "$LOG"; }
+
+say "=== 开机自拉起开始 (pid=$$) ==="
+# 1) 等驱动/设备节点就绪 (最多 180s)
+for i in $(seq 1 60); do
+  [ -e /dev/xpu0 ] && [ -e /proc/xpu/dev0/state ] && break
+  sleep 3
+done
+if [ ! -e /proc/xpu/dev0/state ]; then say "驱动没上来, 放弃(不重试)"; exit 1; fi
+
+# 2) 两芯必须 RUNNING
+S0=$(cat /proc/xpu/dev0/state 2>/dev/null); S1=$(cat /proc/xpu/dev1/state 2>/dev/null)
+say "dev0=$S0 dev1=$S1"
+if [ "$S0" != "RUNNING" ] || [ "$S1" != "RUNNING" ]; then
+  say "状态不是 RUNNING ⇒ 不自作主张 reset, 放弃(等人工处理)"; exit 2
+fi
+
+# 3) 已经有服务在跑就别重复起 (双份会让两芯 HBM 互挤)
+if timeout 6 curl -s http://127.0.0.1:8090/health | grep -q '"status": "ok"'; then
+  say "8090 已有健康服务, 不动它"; exit 0
+fi
+# 残留(引擎死了但 serve 还在 / 重复的安全网包装): 用 recycle2.sh 按持卡者实测清干净
+if pgrep -f "serve[0-9]*\.py" >/dev/null || pgrep -f "safe_run\.sh -n orn" >/dev/null; then
+  say "发现残留服务/安全网包装, 先清干净"
+  bash /home/caden/ornc/recycle2.sh >> "$LOG" 2>&1
+fi
+
+# 4) 起服务 (v2 优先; orn3 不存在则退回老版)
+if [ -x /home/caden/orn_engine/orn3 ] && [ -f /home/caden/ornc/serve2.py ]; then
+  say "启动 v2 服务 (orn3 + serve2.py)..."
+  bash /home/caden/ornc/start2.sh >> "$LOG" 2>&1
+  RC=$?
+else
+  say "v2 缺失, 启动老版服务 (orn + serve.py)..."
+  bash /home/caden/ornc/start.sh >> "$LOG" 2>&1
+  RC=$?
+fi
+say "start rc=$RC"
+timeout 6 curl -s http://127.0.0.1:8090/health >> "$LOG" 2>&1; echo >> "$LOG"
+say "=== 结束 ==="
+exit $RC

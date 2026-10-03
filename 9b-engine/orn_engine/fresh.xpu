@@ -1,0 +1,13 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+// Minimal fresh-device read probe: GM2LM read + LM2GM write, all cores cooperative
+// in[32] = known ints, out[32] = kernel output
+__global__ void fresh_k(const int *in, int *out, int n) {
+    __local__ int l[32];
+    GM2LM(in, l, 32 * 4);
+    // cooperative copy
+    int tid = core_id();
+    if (tid < n) out[tid] = l[tid];
+}
+void run_fresh(const int *in, int *out, int n) { fresh_k<<<1, 32>>>(in, out, n); }

@@ -1,0 +1,11 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+__global__ void lchk_k(float *out) {
+    __local__ float loc[256];
+    int cid = core_id();
+    if (cid == 0) { for (int i = 0; i < 256; i++) loc[i] = 42.0f + i; }
+    sync();
+    LM2GM(loc, out + (size_t)cid * 256, 1024);
+}
+void run_lchk(float *out) { lchk_k<<<1, 16>>>(out); }

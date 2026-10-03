@@ -1,0 +1,14 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+__global__ void bw_k(const unsigned char *W, float *o, int chunk, int niter) {
+    __local__ unsigned char buf[14336];
+    int tid = cluster_id() * core_num() + core_id();
+    if (tid >= 128) return;
+    int acc = 0;
+    for (int i = 0; i < niter; i++) {
+        GM2LM(W + ((size_t)tid * niter + i) * chunk, buf, chunk);
+        acc += buf[0] + buf[chunk - 1];
+    }
+    o[tid] = (float)acc;
+}
+void run_bw(const void *W, void *o, int chunk, int niter) { bw_k<<<8, 16>>>((const unsigned char*)W, (float*)o, chunk, niter); }

@@ -1,0 +1,50 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+// same DMA shape as delta_net, zero compute
+__global__ void dc_k(float *S, const float *k, const float *v, const float *q,
+                     const float *g, const float *b, float *out) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;
+    __local__ float kl[KHD];
+    __local__ float ql[KHD];
+    __local__ float vl[VHD];
+    __local__ float lr[RPC][KHD];
+    __local__ float ob[RPC];
+    int r0 = cid * RPC;
+    for (int hv = hstart; hv < hend; hv++) {
+        int hk = hv % 16;
+        __global_ptr__ const float *kp = k + (size_t)hv * NC * KHD + (size_t)hk * KHD;
+        __global_ptr__ const float *qp = q + (size_t)hv * NC * KHD + (size_t)hk * KHD;
+        __global_ptr__ const float *vp = v + (size_t)hv * VHD;
+        __global_ptr__ float *sp = S + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+        __global_ptr__ float *op = out + (size_t)hv * VHD + r0;
+        GM2LM(kp, kl, KHD * 4);
+        GM2LM(qp, ql, KHD * 4);
+        GM2LM(vp, vl, VHD * 4);
+        GM2LM(sp, lr, RPC * KHD * 4);
+        float eg = 1.001f, bb = 0.5f;
+        for (int rr = 0; rr < RPC; rr++) {
+            float sk = 0.0f;
+            for (int i = 0; i < KHD; i++) { float t = lr[rr][i] * eg; lr[rr][i] = t; sk += t * kl[i]; }
+            float d = (vl[rr] - sk) * bb;
+            float so = 0.0f;
+            for (int i = 0; i < KHD; i++) { float t = lr[rr][i] + kl[i] * d; lr[rr][i] = t; so += t * ql[i]; }
+            ob[rr] = so;
+        }
+        LM2GM(lr, sp, RPC * KHD * 4);
+        LM2GM(ob, op, RPC * 4);
+    }
+}
+void run_dcopy(float *S, const float *k, const float *v, const float *q,
+               const float *g, const float *b, float *out) { dc_k<<<8,16>>>(S,k,v,q,g,b,out); }

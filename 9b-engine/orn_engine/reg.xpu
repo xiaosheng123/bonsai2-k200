@@ -1,0 +1,15 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+__global__ void reg_k(float *o, int n) {
+    float a0=1.f,a1=2.f,a2=3.f,a3=4.f,a4=5.f,a5=6.f,a6=7.f,a7=8.f;
+    float b = 1.000001f;
+    for (int i = 0; i < n; i++) {
+        a0 = a0 * b + 0.1f; a1 = a1 * b + 0.2f;
+        a2 = a2 * b + 0.3f; a3 = a3 * b + 0.4f;
+        a4 = a4 * b + 0.5f; a5 = a5 * b + 0.6f;
+        a6 = a6 * b + 0.7f; a7 = a7 * b + 0.8f;
+    }
+    int t = core_id();
+    if (t < 8) o[cluster_id() * 8 + t] = (a0+a1)+(a2+a3)+((a4+a5)+(a6+a7));
+}
+void run_reg(float *o, int n) { reg_k<<<8, 16>>>(o, n); }

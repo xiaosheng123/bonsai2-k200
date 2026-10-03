@@ -1,0 +1,22 @@
+// gm16k.xpu — 确定性验证: 每核同步 GM2LM 16KB 是否安全且正确
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+__global__ void gm16k(float *src, float *dst) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    int tid = cl * 16 + cid;
+    __local__ float buf[4096];   // 16KB
+    __global_ptr__ float *sp = src + (size_t)tid * 4096;
+    GM2LM(sp, buf, 16384);       // 16KB 一次
+    float s = 0;
+    for (int i = 0; i < 4096; i++) s += buf[i] * 1.0001f;
+    __global_ptr__ float *dp = dst + tid;
+    LM2GM(&s, dp, 4);
+}
+
+void run_gm16k(int clusters, int cores, float *src, float *dst) {
+    gm16k<<<clusters, cores>>>(src, dst);
+}

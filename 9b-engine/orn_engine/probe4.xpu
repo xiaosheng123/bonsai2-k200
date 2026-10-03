@@ -1,0 +1,65 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// 全部 kernel 的 local 总量 <= 8KB
+// A: 单 8KB 阻塞 GM2LM 循环
+__global__ void kb8_k(const unsigned char *W, int nslab, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    int nthr = cluster_num() * core_num();
+    __local__ unsigned char buf[8192];
+    int acc = 0;
+    for (int s = tid; s < nslab; s += nthr) { GM2LM(W + (size_t)s * 8192, buf, 8192); acc += buf[0] + buf[4096]; }
+    out[tid] = (float)acc;
+}
+void run_b8(const void *W, int nslab, void *out, int cl, int co) { kb8_k<<<cl, co>>>((const unsigned char *)W, nslab, (float *)out); }
+
+// B: 2 x 4KB 异步 ping-pong
+__global__ void kb2x4_k(const unsigned char *W, int nslab, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    int nthr = cluster_num() * core_num();
+    __local__ unsigned char b0[4096], b1[4096];
+    int acc = 0; int cur = 0;
+    for (int s = tid; s < nslab; s += nthr) {
+        if (cur == 0) { GM2LM_ASYNC(W + (size_t)s * 8192, b0, 4096); GM2LM_ASYNC(W + (size_t)s * 8192 + 4096, b1, 4096); }
+        else          { GM2LM_ASYNC(W + (size_t)s * 8192, b1, 4096); GM2LM_ASYNC(W + (size_t)s * 8192 + 4096, b0, 4096); }
+        mfence();
+        acc += b0[0] + b1[0];
+        cur ^= 1;
+    }
+    out[tid] = (float)acc;
+}
+void run_b2x4(const void *W, int nslab, void *out, int cl, int co) { kb2x4_k<<<cl, co>>>((const unsigned char *)W, nslab, (float *)out); }
+
+// C: 4 x 2KB 一次性发 4 个异步 DMA
+__global__ void kb4x2_k(const unsigned char *W, int nslab, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    int nthr = cluster_num() * core_num();
+    __local__ unsigned char b[4][2048];
+    int acc = 0;
+    for (int s = tid; s < nslab; s += nthr) {
+        for (int d = 0; d < 4; d++) GM2LM_ASYNC(W + (size_t)s * 8192 + d * 2048, b[d], 2048);
+        mfence();
+        acc += b[0][0] + b[1][0] + b[2][0] + b[3][0];
+    }
+    out[tid] = (float)acc;
+}
+void run_b4x2(const void *W, int nslab, void *out, int cl, int co) { kb4x2_k<<<cl, co>>>((const unsigned char *)W, nslab, (float *)out); }
+
+// D: 12KB 数组 + 8KB DMA (测数组能不能超过 8KB)
+__global__ void kchk12_k(const unsigned char *W, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    __local__ unsigned char buf[12288];
+    GM2LM(W, buf, 8192);
+    out[tid] = (float)(buf[0] + buf[8191]);
+}
+void run_chk12(const void *W, void *out, int cl, int co) { kchk12_k<<<cl, co>>>((const unsigned char *)W, (float *)out); }
+
+// E: 8KB + 8KB 两个数组, 各 DMA 8KB
+__global__ void kchk2x8_k(const unsigned char *W, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    __local__ unsigned char a[8192], b[8192];
+    GM2LM(W, a, 8192); GM2LM(W + 8192, b, 8192);
+    out[tid] = (float)(a[0] + b[8191]);
+}
+void run_chk2x8(const void *W, void *out, int cl, int co) { kchk2x8_k<<<cl, co>>>((const unsigned char *)W, (float *)out); }

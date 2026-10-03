@@ -1,0 +1,34 @@
+# Ornith on K200 —— 任务状态（任何代理/我重启后从这里接上）
+更新时间: 2026-09-21
+
+## 铁律（顺序不可变）
+1. 宿主稳定（NAS 192.168.66.26 是生产机，vfio 直通；卡上异常会拖死宿主）
+2. 正确性
+3. 速度 —— **当前阶段完全不管速度**（用户原话：都跑不起来，谈速度就是耍流氓）
+
+## 安全措施（已就位，不要绕过）
+- 看门狗: /home/caden/orn_engine/watchdog.py（在跑, pidfile /tmp/watchdog.pid, cron 每分钟自愈）
+  作用: tail kern.log, 一旦出现 "Exception in kernel execution"/"exception token="/"session error" 立即 SIGKILL 肇事进程
+- 每次设备运行必须过: /home/caden/orn_engine/safe_run.sh <cmd>
+- 取证: caden 在 adm 组 ⇒ 无需 sudo 读 /var/log/kern.log 与 dmesg；grep -ac "Exception in kernel execution" 就是异常计数
+- 尺寸纪律: 极小 → 中等 → 全量；出一次异常就整体停，严禁重试
+
+## 当前状态
+- 卡: 两芯 RUNNING；历史异常 14 次（全部由旧探针内核 mbench/mb3/probe* 造成），**需保持不再新增**
+- 旧代码 /home/caden/orn_engine/（orn.cpp 56KB + kq8.xpu）: 前向公式已验证正确，
+  离线跑出过 `你好！有什么我可以帮你的吗？😊`（= 与 llama.cpp CPU 基准一字不差）✓
+- 服务: 8090 目前【没有】可用服务
+- 目标模型: /home/caden/orn/Ornith-1.5-9B-Q8_0.gguf (9786060384 B, qwen35 混合架构)
+
+## 下一步（按顺序，每步做完写 PROGRESS.md）
+1. 用已正确的二进制（orn_engine/orn）包出 8090 单端口 OpenAI 兼容服务（强制关思考）
+2. 黄金测试: 固定 13-token 提示 → 卡上输出 == `你好！有什么我可以帮你的吗？😊`
+3. 经 8090 发「你好」→ 通顺回复（耗时可长，如实记录）
+4. 其余 5 条（1+1 / 光合作用 / 中译英 / 写代码 / 税务清单）能答几条算几条
+5. 若老路起不来 ⇒ 用 /home/caden/ornc/ 干净重写（DESIGN.md → wload → 线性层 → 全注意力层 → 32层双芯 → 黄金测试 → serve）
+6. 服务能跑后: 开机自拉起（cron @reboot 或 systemd）
+7. 最后才谈速度（靶子: int8 GEMV ≥100 GB/s ⇒ 9B Q8 理论 ~15 tok/s）
+
+## 机制与资产（重写时照抄，别自己猜）
+- qwen35 机制: ~/.hermes/skills/devops/kunlun-k200-setup/references/ornith-qwen35-mechanism.md
+- 内核坑与天花板: 同目录 k200-kernel-launch-traps.md（坑0=宿主死机, 坑1=HW_CORE=16, 坑2=延迟受限, 附2=带宽基准别用错）

@@ -1,0 +1,159 @@
+// mbench.xpu — K200 微基准: 读带宽 / 标量 / SIMD / int8 路径
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+#include "xpu/kernel/simd.h"
+
+#define HW_CORE 16
+#define TID  (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define NT   (cluster_num() * HW_CORE)
+
+// ---------------- E1: grid 探测 ----------------
+__global__ void info_k(int *o) {
+    int t = cluster_id() * 4096 + core_id();
+    if (t < 100000) o[t] = cluster_id() * 1000 + core_id();
+}
+void m_info(int *o) { info_k<<<4, 16>>>(o); }
+
+// ---------------- E2: GM2LM 纯读带宽 ----------------
+__global__ void rd_k(const unsigned char *W, int span, int chunk, int nch, float *out) {
+    __local__ signed char buf[8192];
+    int tid = TID;
+    float s = 0.f;
+    for (int c = 0; c < nch; c++) {
+        GM2LM(W + tid * span + c * chunk, buf, chunk);
+        s += (float)buf[0];
+    }
+    out[TID] = s;
+}
+void m_rd(const void *W, int span, int chunk, int nch, void *out, int cl, int co) {
+    rd_k<<<cl, co>>>((const unsigned char *)W, span, chunk, nch, (float *)out);
+}
+
+// E2b: 异步多深度 DMA 版
+__global__ void rda_k(const unsigned char *W, int span, int chunk, int nch, int depth, float *out) {
+    __local__ signed char buf[8192];
+    int tid = TID;
+    float s = 0.f;
+    for (int d = 0; d < depth; d++) GM2LM_ASYNC(W + tid * span + d * chunk, buf + d * chunk, chunk);
+    for (int c = 0; c + depth < nch; c++) {
+        mfence();
+        s += (float)buf[0];
+        GM2LM_ASYNC(W + tid * span + (c + depth) * chunk, buf, chunk);
+    }
+    mfence();
+    out[TID] = s;
+}
+void m_rda(const void *W, int span, int chunk, int nch, int depth, void *out, int cl, int co) {
+    rda_k<<<cl, co>>>((const unsigned char *)W, span, chunk, nch, depth, (float *)out);
+}
+
+// ---------------- E3: 直接全局标量读 ----------------
+__global__ void rdg_k(const unsigned char *W, int span, int nchunk, int chunk, unsigned *out) {
+    int tid = TID;
+    int base = tid * span;
+    unsigned s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    int nb = nchunk * chunk;
+    for (int i = 0; i < nb; i += 4) {
+        s0 += W[base + i]; s1 += W[base + i + 1]; s2 += W[base + i + 2]; s3 += W[base + i + 3];
+    }
+    out[tid] = s0 + s1 + s2 + s3;
+}
+void m_rdg(const void *W, int span, int nchunk, int chunk, void *out, int cl, int co) {
+    rdg_k<<<cl, co>>>((const unsigned char *)W, span, nchunk, chunk, (unsigned *)out);
+}
+
+// ---------------- E4: 本地内存 标量 float 2load+FMA ----------------
+__global__ void fma_k(float *out, int reps) {
+    __local__ float a[512] __attribute__((aligned(32)));
+    __local__ float b[512] __attribute__((aligned(32)));
+    for (int i = 0; i < 512; i++) { a[i] = 1.0001f; b[i] = 0.9999f; }
+    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    for (int r = 0; r < reps; r++)
+        for (int i = 0; i < 512; i += 4) {
+            s0 += a[i] * b[i]; s1 += a[i + 1] * b[i + 1];
+            s2 += a[i + 2] * b[i + 2]; s3 += a[i + 3] * b[i + 3];
+        }
+    out[TID] = s0 + s1 + s2 + s3;
+}
+void m_fma(float *o, int reps, int cl, int co) { fma_k<<<cl, co>>>(o, reps); }
+
+// ---------------- E5: 本地 int8 点积 (现状内核风格) ----------------
+__global__ void i8_k(float *out, int reps) {
+    __local__ signed char a[512] __attribute__((aligned(32)));
+    __local__ signed char b[512] __attribute__((aligned(32)));
+    for (int i = 0; i < 512; i++) { a[i] = (signed char)(i & 7); b[i] = (signed char)((i & 3) + 1); }
+    int s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    for (int r = 0; r < reps; r++)
+        for (int i = 0; i < 512; i += 4) {
+            s0 += (int)a[i] * (int)b[i]; s1 += (int)a[i + 1] * (int)b[i + 1];
+            s2 += (int)a[i + 2] * (int)b[i + 2]; s3 += (int)a[i + 3] * (int)b[i + 3];
+        }
+    out[TID] = (float)(s0 + s1 + s2 + s3);
+}
+void m_i8(float *o, int reps, int cl, int co) { i8_k<<<cl, co>>>(o, reps); }
+
+// ---------------- E6: 256 位 float SIMD 吞吐 ----------------
+__global__ void simd_k(float *out, int reps) {
+    __local__ float va[512] __attribute__((aligned(64)));
+    __local__ float vb[512] __attribute__((aligned(64)));
+    __local__ float vc[512] __attribute__((aligned(64)));
+    for (int i = 0; i < 512; i++) { va[i] = 1.0001f; vb[i] = 0.9999f; vc[i] = 0.f; }
+    for (int r = 0; r < reps; r++)
+        for (int i = 0; i < 512; i += 8) {
+            _x256_vvmul_ls(va + i, vb + i, vc + i);
+            _x256_vvadd_ls(vc + i, va + i, vc + i);
+        }
+    out[TID] = vc[0] + vc[8] + vc[16] + vc[24];
+}
+void m_simd(float *o, int reps, int cl, int co) { simd_k<<<cl, co>>>(o, reps); }
+
+// ---------------- E7: int8 解包->float + SIMD MAC ----------------
+// qa: int8 权重; va: 展开后的 float; 每 8 个一组做 vvmul+vvadd
+__global__ void cvt_k(float *out, int reps) {
+    __local__ signed char qa[512] __attribute__((aligned(32)));
+    __local__ signed char qb[512] __attribute__((aligned(32)));
+    __local__ float va[512] __attribute__((aligned(64)));
+    __local__ float vb[512] __attribute__((aligned(64)));
+    __local__ float vc[512] __attribute__((aligned(64)));
+    for (int i = 0; i < 512; i++) { qa[i] = (signed char)(i & 7); qb[i] = (signed char)((i & 3) + 1); vc[i] = 0.f; }
+    for (int r = 0; r < reps; r++)
+        for (int i = 0; i < 512; i += 8) {
+            #pragma unroll
+            for (int k = 0; k < 8; k++) { va[i + k] = (float)qa[i + k]; vb[i + k] = (float)qb[i + k]; }
+            _x256_vvmul_ls(va + i, vb + i, va + i);
+            _x256_vvadd_ls(vc + i, va + i, vc + i);
+        }
+    out[TID] = vc[0] + vc[8] + vc[16] + vc[24];
+}
+void m_cvt(float *o, int reps, int cl, int co) { cvt_k<<<cl, co>>>(o, reps); }
+
+// E7b: int32 一次读 4×int8 再用移位展开 + SIMD MAC
+__global__ void cvt2_k(float *out, int reps) {
+    __local__ unsigned a32[128] __attribute__((aligned(32)));
+    __local__ unsigned b32[128] __attribute__((aligned(32)));
+    __local__ float va[512] __attribute__((aligned(64)));
+    __local__ float vb[512] __attribute__((aligned(64)));
+    __local__ float vc[512] __attribute__((aligned(64)));
+    for (int i = 0; i < 128; i++) { a32[i] = 0x01020304u + i; b32[i] = 0x05060708u + i; }
+    for (int i = 0; i < 512; i++) vc[i] = 0.f;
+    for (int r = 0; r < reps; r++)
+        for (int i = 0; i < 128; i += 2) {
+            unsigned A0 = a32[i], A1 = a32[i + 1], B0 = b32[i], B1 = b32[i + 1];
+            int j = i * 4;
+            va[j + 0] = (float)(int)(A0 << 24 >> 24); va[j + 1] = (float)(int)(A0 << 16 >> 24);
+            va[j + 2] = (float)(int)(A0 <<  8 >> 24); va[j + 3] = (float)(int)(A0 >> 24);
+            va[j + 4] = (float)(int)(A1 << 24 >> 24); va[j + 5] = (float)(int)(A1 << 16 >> 24);
+            va[j + 6] = (float)(int)(A1 <<  8 >> 24); va[j + 7] = (float)(int)(A1 >> 24);
+            vb[j + 0] = (float)(int)(B0 << 24 >> 24); vb[j + 1] = (float)(int)(B0 << 16 >> 24);
+            vb[j + 2] = (float)(int)(B0 <<  8 >> 24); vb[j + 3] = (float)(int)(B0 >> 24);
+            vb[j + 4] = (float)(int)(B1 << 24 >> 24); vb[j + 5] = (float)(int)(B1 << 16 >> 24);
+            vb[j + 6] = (float)(int)(B1 <<  8 >> 24); vb[j + 7] = (float)(int)(B1 >> 24);
+            _x256_vvmul_ls(va + j, vb + j, va + j);
+            _x256_vvadd_ls(vc + j, va + j, vc + j);
+        }
+    out[TID] = vc[0] + vc[8] + vc[16] + vc[24];
+}
+void m_cvt2(float *o, int reps, int cl, int co) { cvt2_k<<<cl, co>>>(o, reps); }
+
+// E8: 全局直接读 + float 乘加 (跳过 local)

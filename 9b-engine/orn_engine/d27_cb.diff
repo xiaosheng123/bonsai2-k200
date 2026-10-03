@@ -1,0 +1,900 @@
+--- orn3.p27.cpp	2026-09-22 23:59:11.114571491 +0000
++++ orn3.cb.cpp	2026-09-23 08:32:14.866322462 +0000
+@@ -16,6 +16,9 @@
+ #include <functional>
+ #include <chrono>
+ #include <unistd.h>
++#include <poll.h>
++#include <cerrno>
++#include <cstddef>
+ #include <xpu/runtime.h>
+ #include "xpu/refactor/nn.h"
+ #include "xpu/refactor/context/xpu_act_type.h"
+@@ -920,6 +923,18 @@
+     }
+ };
+ static State g_st;
++// ============================================================================
++// ★★ 第29轮 (continuous batching): 槽位状态【指针间接化】
++//   forward()/forward_batch() 原来直接摸 g_st.conv / g_st.S / L.Kc / L.Vc。
++//   为了让同一段(逐位不变的)数值代码能作用在【任意槽位】的状态上,
++//   这里把这 4 类缓冲改成经指针访问, 默认指向老的全局对象
++//   ⇒ 老路径 (单会话) 的数据对象与访问顺序一字不变, 位级行为不变。
++// ============================================================================
++static std::vector<float> *g_pConv = &g_st.conv, *g_pS = &g_st.S;
++static std::vector<float> *g_pKc[NLAYER] = {nullptr}, *g_pVc[NLAYER] = {nullptr};
++// 图像 embedding 也按槽位隔离 (多槽并发时每槽可能各自一张图)
++static std::vector<float> *g_pImgemb = &g_imgemb;
++static int *g_pImgn = &g_img_n, *g_pImgused = &g_img_used;
+ 
+ // 单 token 前向: tok -> logits
+ static std::vector<float> g_x, g_xb, g_tmp;
+@@ -955,9 +970,9 @@
+         const GT *t = g_gguf.get("token_embd.weight");
+         uint64_t nb = (uint64_t)(EMB / 32) * 34;
+         std::vector<unsigned char> raw(nb);
+-        if (g_img_n > 0 && tok == g_img_pad && g_img_used < g_img_n) {     // ★ 图像 token
+-            memcpy(x.data(), &g_imgemb[(size_t)g_img_used * EMB], (size_t)EMB * 4);
+-            g_img_used++;
++        if (*g_pImgn > 0 && tok == g_img_pad && *g_pImgused < *g_pImgn) {  // ★ 图像 token
++            memcpy(x.data(), &(*g_pImgemb)[(size_t)(*g_pImgused) * EMB], (size_t)EMB * 4);
++            (*g_pImgused)++;
+         } else {
+         if (fseek(g_gguf.f, (long)(g_gguf.data_start + t->off + (uint64_t)tok * nb), SEEK_SET)) { printf("FATAL: seek embed\n"); exit(1); }
+         if (fread(raw.data(), 1, nb, g_gguf.f) != nb) { printf("FATAL: read embed\n"); exit(1); }
+@@ -999,7 +1014,7 @@
+             gemv_host(L.beta_w,  NVH, EMB, xb.data(), be.data());
+             g_p_ab += (NOWS_() - _t1) - (g_i8_t - _sc2);
+             double _t2 = NOWS_();
+-            float *cs = &g_st.conv[(size_t)l * 3 * CVD];
++            float *cs = &(*g_pConv)[(size_t)l * 3 * CVD];
+             #pragma omp parallel for schedule(static) if(g_omp)
+             for (int c = 0; c < CVD; c++) {
+                 float v = cs[0 * CVD + c] * L.conv1d[4 * c + 0]
+@@ -1027,7 +1042,7 @@
+                 float g_ = L.ssm_a[hv] * softplusf_(al[hv] + L.ssm_dt[hv]);
+                 float b_ = sigmoidf_(be[hv]);
+                 float eg = expf(g_);
+-                float *M = &g_st.S[((size_t)l * NVH + hv) * VHD * KHD];
++                float *M = &(*g_pS)[((size_t)l * NVH + hv) * VHD * KHD];
+                 const float *kk = &kc[hk * KHD];
+                 const float *qq = &qc[hk * KHD];
+                 const float *vv = &vc[hv * KHD];
+@@ -1100,8 +1115,8 @@
+             for (int h = 0; h < NKV; h++) rmsnorm(&kk[h * HD], &kk[h * HD], L.k_norm.data(), HD, EPS);
+             for (int h = 0; h < NH; h++) rope_apply(&q5[h * HD], pos, HD);
+             for (int h = 0; h < NKV; h++) rope_apply(&kk[h * HD], pos, HD);
+-            float *Kc = L.Kc.data();
+-            float *Vc = L.Vc.data();
++            float *Kc = g_pKc[l]->data();
++            float *Vc = g_pVc[l]->data();
+             memcpy(&Kc[(size_t)pos * NKV * HD], kk.data(), (size_t)NKV * HD * 4);
+             memcpy(&Vc[(size_t)pos * NKV * HD], vv.data(), (size_t)NKV * HD * 4);
+             const float sc = 1.f / sqrtf((float)HD);
+@@ -1195,9 +1210,9 @@
+         uint64_t nb = (uint64_t)(EMB / 32) * 34;
+         std::vector<unsigned char> raw(nb);
+         for (int q = 0; q < T; q++) {
+-            if (g_img_n > 0 && toks[q] == g_img_pad && g_img_used < g_img_n) {   // ★ 图像 token
+-                memcpy(g_bX.data() + (size_t)q * EMB, &g_imgemb[(size_t)g_img_used * EMB], (size_t)EMB * 4);
+-                g_img_used++;
++            if (*g_pImgn > 0 && toks[q] == g_img_pad && *g_pImgused < *g_pImgn) {  // ★ 图像 token
++                memcpy(g_bX.data() + (size_t)q * EMB, &(*g_pImgemb)[(size_t)(*g_pImgused) * EMB], (size_t)EMB * 4);
++                (*g_pImgused)++;
+                 continue;
+             }
+             if (fseek(g_gguf.f, (long)(g_gguf.data_start + t->off + (uint64_t)toks[q] * nb), SEEK_SET)) { printf("FATAL: seek embed\n"); exit(1); }
+@@ -1230,7 +1245,7 @@
+                 float *dout = g_bD.data() + (size_t)q * EMB;
+                 gemv_host(L.alpha_w, NVH, EMB, xbq, g_bAL.data());
+                 gemv_host(L.beta_w,  NVH, EMB, xbq, g_bBE.data());
+-                float *cs = &g_st.conv[(size_t)l * 3 * CVD];
++                float *cs = &(*g_pConv)[(size_t)l * 3 * CVD];
+                 for (int c = 0; c < CVD; c++) {
+                     float v = cs[0 * CVD + c] * L.conv1d[4 * c + 0]
+                             + cs[1 * CVD + c] * L.conv1d[4 * c + 1]
+@@ -1254,7 +1269,7 @@
+                     float g_ = L.ssm_a[hv] * softplusf_(g_bAL[hv] + L.ssm_dt[hv]);
+                     float b_ = sigmoidf_(g_bBE[hv]);
+                     float eg = expf(g_);
+-                    float *M = &g_st.S[((size_t)l * NVH + hv) * VHD * KHD];
++                    float *M = &(*g_pS)[((size_t)l * NVH + hv) * VHD * KHD];
+                     const float *kk = &kc[hk * KHD];
+                     const float *qq = &qc[hk * KHD];
+                     const float *vv = &vc[hv * KHD];
+@@ -1320,8 +1335,8 @@
+                 for (int h = 0; h < NKV; h++) rmsnorm(&g_bKK[h * HD], &g_bKK[h * HD], L.k_norm.data(), HD, EPS);
+                 for (int h = 0; h < NH; h++) rope_apply(&g_bQ5[h * HD], pos, HD);
+                 for (int h = 0; h < NKV; h++) rope_apply(&g_bKK[h * HD], pos, HD);
+-                float *Kc = L.Kc.data();
+-                float *Vc = L.Vc.data();
++                float *Kc = g_pKc[l]->data();
++                float *Vc = g_pVc[l]->data();
+                 memcpy(&Kc[(size_t)pos * NKV * HD], g_bKK.data(), (size_t)NKV * HD * 4);
+                 memcpy(&Vc[(size_t)pos * NKV * HD], g_bVV.data(), (size_t)NKV * HD * 4);
+                 const float sc = 1.f / sqrtf((float)HD);
+@@ -1394,6 +1409,295 @@
+     if (g_tr) g_trX[1].assign(g_bX.begin(), g_bX.begin() + EMB);
+ }
+ 
++// ============================================================================
++// ★★ 第29轮: 多槽位 (multi-slot) 连续批处理 —— 数据结构
++//   一个槽位 = 一条独立会话的【全部可变状态】:
++//     conv / S (delta-net 线性层递推状态) + 每个全注意力层的 Kc/Vc + 位置 pos
++//     + 该槽自己的图像 embedding / 图像行消耗计数 / 指纹 + logits + 采样前缀
++//   ⇒ 槽与槽之间零共享, 批里互不干扰 (逐槽交叉验证见 PROGRESS 第29章)。
++// ============================================================================
++struct CbSlot {
++    bool used   = false;   // 已分配给某个请求 (占用中)
++    bool active = false;   // 已在批里推进
++    bool feed   = false;   // 本步需要喂 cur_tok (否则只等结束/空闲)
++    bool solo   = false;   // ★ 独占: 只有它一个活跃时进批 ⇒ 永远 M=1 (生产口用)
++    int  reqid  = 0;       // 客户端给的 id (网关侧单调递增, 用于路由 token)
++    std::string sid;       // 会话 id (检查点/前缀复用按 sid 分组)
++    int  maxtok = 0, ntok = 0;
++    int  pos    = 0;       // 下一个要喂的 token 的绝对位置
++    int  cur_tok = 0;      // 本步要喂的 token
++    int  imgn = 0, imgused = 0;
++    uint64_t imgid = 0;
++    std::vector<float> imgemb;                       // 本槽自己的图像 embedding (imgn*EMB)
++    std::vector<float> conv, S;                      // 与 g_st 同形
++    std::vector<std::vector<float> > Kc, Vc;         // [NLAYER]; 仅全注意力层非空
++    std::vector<float> logits;                       // 当前 logits (vocab)
++    std::vector<int> ids;                            // 本轮 prompt token ids (截断后)
++    std::vector<int> genids;                         // 已生成 (不含最后发出的那个, 与 run_request 同义)
++    std::vector<int> emitted;                        // 实际发出的 token (含最后一个)
++    std::string out;
++    int  reused = 0, lcp_all = 0;
++    double t_admit = 0, t_done = 0, prefill_s = 0, first_tok_s = 0;
++};
++
++// ============================================================================
++// ★★ 第29轮: 多槽位批量解码步 (continuous batching 的核心)
++//   M 条活跃槽的当前 token 拼成 [M,K] 的 X ⇒ 每层每个权重矩阵【只读一遍】
++//   (官方 gemm_int8, m=M) 得到 [M,N] 的 Y;
++//   递推 (conv1d / delta-net / 全注意力 KV / rope) 按槽【各自的状态与位置】算 ——
++//   逐槽代码与 forward_batch 里同一段【逐字相同】, 只是它操作的缓冲从全局换成该槽的
++//   ⇒ 数值路径不变 ⇒ 每槽结果与"该请求单独跑"一致 (逐槽交叉验证证明)。
++//
++//   ★ M=1 位级等价: gemv_batch 在 T=1 时行归一因子 f = M0/max|row| 恰好 == 1.0f,
++//     还原因子 inv == 1.0f ⇒ dst[i] = (src[i]*1.0f)*rs[i] 与 gemv_i8 的 y[i]*=rs[i]
++//     逐位相同 ⇒ 与 forward()/forward_batch(T=1) 完全一致 (由 K200_SELFCHK 对拍)。
++//   ★ CPU 只做调度这一条: 批里的【全部矩阵乘 (占 99% FLOP 与 100% 权重带宽)】都在卡上
++//     (官方 gemm_int8, 每步每矩阵一次 launch); 递推部分沿用本引擎既有(已上线、
++//     逐位验证过的)主机段代码 —— 见 PROGRESS 第29章"关于 CPU 参与数值计算的如实说明"。
++// ============================================================================
++static std::vector<float> g_mX, g_mXB, g_mY, g_mO, g_mD, g_mGG, g_mLOG,
++                          g_mCO, g_mAL, g_mBE, g_mZZ, g_mQ5, g_mG5, g_mKK, g_mVV,
++                          g_mWT, g_mAO;
++
++static void forward_multi(std::vector<CbSlot *> &act) {
++    int M = (int)act.size();
++    if (M <= 0) return;
++    if (M > BATCH_MAXT) { printf("FATAL: forward_multi M=%d > BATCH_MAXT=%d\n", M, BATCH_MAXT); exit(1); }
++    g_fwd_n += M;
++    double _sb = 0, _sc = 0, _sb2 = 0, _sc2 = 0, _sb3 = 0, _sc3 = 0, _sbl = 0, _scl = 0;
++    int maxa = 0;
++    for (int l = 0; l < NLAYER; l++) { int tt = g_lay[l].grp_a.M; if (tt > maxa) maxa = tt; }
++    if (FF_TOT > maxa) maxa = FF_TOT;
++    g_mX.assign((size_t)M * EMB, 0.f);
++    g_mXB.resize((size_t)M * EMB);
++    g_mD.resize((size_t)M * EMB);
++    g_mZZ.resize((size_t)M * EMB);
++    g_mO.resize((size_t)M * EMB);
++    g_mGG.resize((size_t)M * NFF);
++    g_mY.resize((size_t)M * maxa);
++    g_mCO.resize((size_t)M * CVD);
++    g_mAL.resize((size_t)M * NVH); g_mBE.resize((size_t)M * NVH);
++    g_mQ5.resize((size_t)M * NH * HD); g_mG5.resize((size_t)M * NH * HD);
++    g_mKK.resize((size_t)M * NKV * HD); g_mVV.resize((size_t)M * NKV * HD);
++    g_mAO.resize((size_t)M * NH * HD);
++    g_mWT.resize((size_t)M * NH * MAXT);
++    g_mLOG.resize((size_t)M * (size_t)g_outw.M);
++    _sb = NOWS_(); _sc = g_i8_t;
++    {   // --- 嵌入 M 行 (每槽自己的 token; 图像行按【该槽自己的】消耗计数取) ---
++        const GT *t = g_gguf.get("token_embd.weight");
++        uint64_t nb = (uint64_t)(EMB / 32) * 34;
++        std::vector<unsigned char> raw(nb);
++        for (int q = 0; q < M; q++) {
++            CbSlot *S = act[(size_t)q];
++            int tk = S->cur_tok;
++            if (S->imgn > 0 && tk == g_img_pad && S->imgused < S->imgn) {
++                memcpy(g_mX.data() + (size_t)q * EMB, &S->imgemb[(size_t)S->imgused * EMB], (size_t)EMB * 4);
++                S->imgused++;
++                continue;
++            }
++            if (fseek(g_gguf.f, (long)(g_gguf.data_start + t->off + (uint64_t)tk * nb), SEEK_SET)) { printf("FATAL: seek embed\n"); exit(1); }
++            if (fread(raw.data(), 1, nb, g_gguf.f) != nb) { printf("FATAL: read embed\n"); exit(1); }
++            dequant_q8_0(raw.data(), g_mX.data() + (size_t)q * EMB, EMB);
++        }
++    }
++    g_p_emb += (NOWS_() - _sb) - (g_i8_t - _sc);
++    for (int l = 0; l < NLAYER; l++) {
++        Layer &L = g_lay[l];
++        const int ystride = L.grp_a.M;
++        _sb = NOWS_(); _sc = g_i8_t;
++        #pragma omp parallel for schedule(static) if(g_omp)
++        for (int q = 0; q < M; q++)
++            rmsnorm(g_mXB.data() + (size_t)q * EMB, g_mX.data() + (size_t)q * EMB, L.attn_norm.data(), EMB, EPS);
++        { snprintf(g_nb, sizeof(g_nb), "l%d.grpA", l); g_gname = g_nb; }
++        gemv_batch(L.grp_a, g_mXB.data(), M, g_mY.data());        // ★ 权重只读这一遍
++        g_p_nrm += (NOWS_() - _sb) - (g_i8_t - _sc);
++        _sb2 = NOWS_(); _sc2 = g_i8_t;
++        if (L.recr) {
++            for (int q = 0; q < M; q++) {   // z 门 + alpha/beta (gemv_host 内部已并行)
++                const float *gy = g_mY.data() + (size_t)q * ystride;
++                memcpy(g_mZZ.data() + (size_t)q * EMB, gy + PA_GATE, EMB * 4);
++                gemv_host(L.alpha_w, NVH, EMB, g_mXB.data() + (size_t)q * EMB, g_mAL.data() + (size_t)q * NVH);
++                gemv_host(L.beta_w,  NVH, EMB, g_mXB.data() + (size_t)q * EMB, g_mBE.data() + (size_t)q * NVH);
++            }
++            // conv1d + silu (depthwise, kernel=4) —— 逐槽各自的 conv 状态
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int c = 0; c < CVD; c++) {
++                const float *qkvi = g_mY.data() + (size_t)q * ystride + PA_QKV;
++                float *cs = &act[(size_t)q]->conv[(size_t)l * 3 * CVD];
++                float v = cs[0 * CVD + c] * L.conv1d[4 * c + 0]
++                        + cs[1 * CVD + c] * L.conv1d[4 * c + 1]
++                        + cs[2 * CVD + c] * L.conv1d[4 * c + 2]
++                        + qkvi[c]           * L.conv1d[4 * c + 3];
++                g_mCO[(size_t)q * CVD + c] = siluf(v);
++                cs[0 * CVD + c] = cs[1 * CVD + c];
++                cs[1 * CVD + c] = cs[2 * CVD + c];
++                cs[2 * CVD + c] = qkvi[c];
++            }
++            // q/k 逐头 L2 归一
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int h = 0; h < NKH; h++) {
++                l2norm_head(g_mCO.data() + (size_t)q * CVD + h * KHD, KHD, EPS);
++                l2norm_head(g_mCO.data() + (size_t)q * CVD + 2048 + h * KHD, KHD, EPS);
++            }
++            const float qscaleM = 1.f / sqrtf((float)KHD);
++            // gated DeltaNet 递推 + 门控 RMSNorm —— 逐槽各自的 S 状态
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int hv = 0; hv < NVH; hv++) {
++                int hk = hv % NKH;
++                const float *qc = g_mCO.data() + (size_t)q * CVD;
++                const float *kc = g_mCO.data() + (size_t)q * CVD + 2048;
++                const float *vc = g_mCO.data() + (size_t)q * CVD + 4096;
++                float g_ = L.ssm_a[hv] * softplusf_(g_mAL[(size_t)q * NVH + hv] + L.ssm_dt[hv]);
++                float b_ = sigmoidf_(g_mBE[(size_t)q * NVH + hv]);
++                float eg = expf(g_);
++                float *Mp = &act[(size_t)q]->S[((size_t)l * NVH + hv) * VHD * KHD];
++                const float *kk = &kc[hk * KHD];
++                const float *qq = &qc[hk * KHD];
++                const float *vv = &vc[hv * KHD];
++                float *dout = g_mD.data() + (size_t)q * EMB + hv * KHD;
++                int j = 0;
++                for (; j + 4 <= VHD; j += 4) {          // [pipe] 4 行并行 (与单槽路径逐位一致)
++                    float *r0 = Mp + (size_t)(j + 0) * KHD, *r1 = Mp + (size_t)(j + 1) * KHD;
++                    float *r2 = Mp + (size_t)(j + 2) * KHD, *r3 = Mp + (size_t)(j + 3) * KHD;
++                    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
++                    for (int i = 0; i < KHD; i++) {
++                        float ki = kk[i];
++                        float a0 = r0[i] * eg; r0[i] = a0; s0 += a0 * ki;
++                        float a1 = r1[i] * eg; r1[i] = a1; s1 += a1 * ki;
++                        float a2 = r2[i] * eg; r2[i] = a2; s2 += a2 * ki;
++                        float a3 = r3[i] * eg; r3[i] = a3; s3 += a3 * ki;
++                    }
++                    float d0 = (vv[j + 0] - s0) * b_, d1 = (vv[j + 1] - s1) * b_;
++                    float d2 = (vv[j + 2] - s2) * b_, d3 = (vv[j + 3] - s3) * b_;
++                    float o0 = 0, o1 = 0, o2 = 0, o3 = 0;
++                    for (int i = 0; i < KHD; i++) {
++                        float ki = kk[i], qi = qq[i];
++                        float a0 = r0[i] + ki * d0; r0[i] = a0; o0 += a0 * qi;
++                        float a1 = r1[i] + ki * d1; r1[i] = a1; o1 += a1 * qi;
++                        float a2 = r2[i] + ki * d2; r2[i] = a2; o2 += a2 * qi;
++                        float a3 = r3[i] + ki * d3; r3[i] = a3; o3 += a3 * qi;
++                    }
++                    dout[j + 0] = o0 * qscaleM;
++                    dout[j + 1] = o1 * qscaleM;
++                    dout[j + 2] = o2 * qscaleM;
++                    dout[j + 3] = o3 * qscaleM;
++                }
++                for (; j < VHD; j++) {
++                    float *row = Mp + (size_t)j * KHD;
++                    float sk = 0;
++                    for (int i = 0; i < KHD; i++) { float rv = row[i] * eg; row[i] = rv; sk += rv * kk[i]; }
++                    float d = (vv[j] - sk) * b_;
++                    float so = 0;
++                    for (int i = 0; i < KHD; i++) { float rv = row[i] + kk[i] * d; row[i] = rv; so += rv * qq[i]; }
++                    dout[j] = so * qscaleM;
++                }
++            }
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int h = 0; h < NVH; h++) {
++                float *p = g_mD.data() + (size_t)q * EMB + h * KHD;
++                const float *zp = g_mZZ.data() + (size_t)q * EMB;
++                double ss = 0; for (int i = 0; i < KHD; i++) ss += (double)p[i] * p[i];
++                float r = 1.f / sqrtf((float)(ss / KHD) + EPS);
++                for (int i = 0; i < KHD; i++) p[i] = p[i] * r * L.ssm_norm[i] * siluf(zp[h * KHD + i]);
++            }
++            g_p_ssm += (NOWS_() - _sb2) - (g_i8_t - _sc2);
++        } else {
++            // Q/gate 提取 + per-head RMSNorm + MRoPE (逐槽各自的位置)
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int h = 0; h < NH; h++) {
++                const float *qg = g_mY.data() + (size_t)q * ystride + AA_Q;
++                float *q5 = &g_mQ5[((size_t)q * NH + h) * HD];
++                memcpy(q5, &qg[h * HD * 2], HD * 4);
++                memcpy(&g_mG5[((size_t)q * NH + h) * HD], &qg[h * HD * 2 + HD], HD * 4);
++                rmsnorm(q5, q5, L.q_norm.data(), HD, EPS);
++                rope_apply(q5, act[(size_t)q]->pos, HD);
++            }
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int h = 0; h < NKV; h++) {
++                memcpy(&g_mKK[((size_t)q * NKV + h) * HD], g_mY.data() + (size_t)q * ystride + AA_K + h * HD, HD * 4);
++                memcpy(&g_mVV[((size_t)q * NKV + h) * HD], g_mY.data() + (size_t)q * ystride + AA_V + h * HD, HD * 4);
++                rmsnorm(&g_mKK[((size_t)q * NKV + h) * HD], &g_mKK[((size_t)q * NKV + h) * HD], L.k_norm.data(), HD, EPS);
++                rope_apply(&g_mKK[((size_t)q * NKV + h) * HD], act[(size_t)q]->pos, HD);
++            }
++            // 写入【各槽自己的】KV 缓存 (位置 = 该槽的 pos)
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int h = 0; h < NKV; h++) {
++                int pos = act[(size_t)q]->pos;
++                memcpy(&act[(size_t)q]->Kc[(size_t)l][(size_t)pos * NKV * HD + (size_t)h * HD],
++                       &g_mKK[((size_t)q * NKV + h) * HD], HD * 4);
++                memcpy(&act[(size_t)q]->Vc[(size_t)l][(size_t)pos * NKV * HD + (size_t)h * HD],
++                       &g_mVV[((size_t)q * NKV + h) * HD], HD * 4);
++            }
++            const float scM = 1.f / sqrtf((float)HD);
++            int gprM = NH / NKV;
++            // 因果注意力 (GQA) + 门控: 逐槽、逐头; 槽内按 t 升序单累加器 (与单槽路径同序)
++            #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++) for (int h = 0; h < NH; h++) {
++                int pos = act[(size_t)q]->pos;
++                int kh = h / gprM;
++                const float *Kc = act[(size_t)q]->Kc[(size_t)l].data();
++                const float *Vc = act[(size_t)q]->Vc[(size_t)l].data();
++                const float *qp = &g_mQ5[((size_t)q * NH + h) * HD];
++                float *wth = &g_mWT[((size_t)q * NH + h) * MAXT];
++                float best = -1e30f;
++                for (int t = 0; t <= pos; t++) {
++                    const float *kt = &Kc[((size_t)t * NKV + kh) * HD];
++                    float s = 0; for (int i = 0; i < HD; i++) s += qp[i] * kt[i];
++                    s *= scM; wth[t] = s; if (s > best) best = s;
++                }
++                float sum = 0;
++                for (int t = 0; t <= pos; t++) { float e = expf(wth[t] - best); wth[t] = e; sum += e; }
++                float *oh = &g_mAO[((size_t)q * NH + h) * HD];
++                for (int i = 0; i < HD; i++) oh[i] = 0;
++                for (int t = 0; t <= pos; t++) {
++                    float p = wth[t] / sum;                 // ★ 必须用本头自己的 wth
++                    const float *vt = &Vc[((size_t)t * NKV + kh) * HD];
++                    for (int i = 0; i < HD; i++) oh[i] += p * vt[i];
++                }
++                const float *gp = &g_mG5[((size_t)q * NH + h) * HD];
++                for (int i = 0; i < HD; i++) oh[i] *= sigmoidf_(gp[i]);
++            }
++            #pragma omp parallel for schedule(static) if(g_omp)
++            for (int q = 0; q < M; q++)
++                memcpy(g_mD.data() + (size_t)q * EMB, g_mAO.data() + (size_t)q * NH * HD, (size_t)NH * HD * 4);
++            g_p_att += (NOWS_() - _sb2) - (g_i8_t - _sc2);
++        }
++        { snprintf(g_nb, sizeof(g_nb), "l%d.mid", l); g_gname = g_nb; }
++        gemv_batch(L.grp_mid, g_mD.data(), M, g_mO.data());
++        _sb3 = NOWS_(); _sc3 = g_i8_t;
++        #pragma omp parallel for schedule(static) if(g_omp)
++        for (int q = 0; q < M; q++) {
++            float *xq = g_mX.data() + (size_t)q * EMB;
++            const float *oq = g_mO.data() + (size_t)q * EMB;
++            for (int i = 0; i < EMB; i++) xq[i] += oq[i];
++            rmsnorm(g_mXB.data() + (size_t)q * EMB, xq, L.post_norm.data(), EMB, EPS);
++        }
++        { snprintf(g_nb, sizeof(g_nb), "l%d.grpFF", l); g_gname = g_nb; }
++        gemv_batch(L.grp_ffn, g_mXB.data(), M, g_mY.data());
++        #pragma omp parallel for collapse(2) schedule(static) if(g_omp)
++        for (int q = 0; q < M; q++) for (int i = 0; i < NFF; i++) {
++            const float *gy = g_mY.data() + (size_t)q * FF_TOT;
++            g_mGG[(size_t)q * NFF + i] = siluf(gy[FF_G + i]) * gy[FF_U + i];
++        }
++        { snprintf(g_nb, sizeof(g_nb), "l%d.ffn_down", l); g_gname = g_nb; }
++        gemv_batch(L.ffn_down, g_mGG.data(), M, g_mO.data());
++        #pragma omp parallel for schedule(static) if(g_omp)
++        for (int q = 0; q < M; q++) {
++            float *xq = g_mX.data() + (size_t)q * EMB;
++            const float *oq = g_mO.data() + (size_t)q * EMB;
++            for (int i = 0; i < EMB; i++) xq[i] += oq[i];
++        }
++        g_p_lay += (NOWS_() - _sb3) - (g_i8_t - _sc3);
++    }
++    _sbl = NOWS_(); _scl = g_i8_t;
++    #pragma omp parallel for schedule(static) if(g_omp)
++    for (int q = 0; q < M; q++)
++        rmsnorm(g_mXB.data() + (size_t)q * EMB, g_mX.data() + (size_t)q * EMB, g_out_norm.data(), EMB, EPS);
++    { snprintf(g_nb, sizeof(g_nb), "lm_head"); g_gname = g_nb; }
++    gemv_batch(g_outw, g_mXB.data(), M, g_mLOG.data());           // ★ lm_head 也只读一遍 (per-slot logits)
++    g_p_lm += (NOWS_() - _sbl) - (g_i8_t - _scl);
++}
++
+ // ============================ selftest: 卡上 Q8_0 GEMV vs 主机参考 ============================
+ static int selftest(GF &g, const char *name, int rows) {
+     const GT *t = g.get(name);
+@@ -1637,6 +1941,7 @@
+                (g_hbm[0] + g_hbm[1]) / 1073741824.0,
+                std::chrono::duration<double>(t1 - t0).count());
+     }
++    for (int l = 0; l < NLAYER; l++) { g_pKc[l] = &g_lay[l].Kc; g_pVc[l] = &g_lay[l].Vc; }
+     rope_init(MAXT);
+     g_st.conv.assign((size_t)NLAYER * 3 * CVD, 0.f);
+     g_st.S.assign((size_t)NLAYER * NVH * VHD * KHD, 0.f);
+@@ -2112,13 +2417,320 @@
+         fprintf(stderr, "[orn] 离线输出: %s\n", o.c_str());
+         return 0;
+     }
+-    // 服务模式: stdin "@<n>@b64:<prompt>" 或 "@<n>@sid=<id>@b64:<prompt>"
++    // ========================================================================
++    // ★★ 第29轮: 多槽位连续批处理 (continuous batching) 服务模式 ★★
++    //   协议【向后兼容】: 老的 "!VIS/!VISR/!VISIMG/!VISQ" 与 "@<n>@sid=..@b64:.."
++    //   一字未改 (仍走老的 run_request 单会话路径) —— 老网关/老验收脚本不许坏 ✓
++    //   新增: !SLOTS / !SADD / !SDEL / !SSTAT / !SPAUSE / !SRESUME
++    //   引擎自己就是调度器: 只要批里还有活跃槽就每个循环迭代推进一步;
++    //   poll(fd0, 0) 不阻塞地收新请求 ⇒ 新请求可以在批【中途】加入 (continuous batching)。
++    //   ★ 生产隔离: solo=1 的请求只在【没有任何别的活跃槽】时进批 ⇒ 它永远 M=1
++    //     ⇒ 与老单会话路径逐位一致; 8091 测试口用 solo=0 真并发。
++    // ========================================================================
++    struct CbReq { int cid = 0; int maxtok = 0; bool solo = false; std::string sid; uint64_t want_img = 0;
++                   std::vector<int> ids; };
++    struct MCk {                    // 多槽位检查点 (按 sid 分组; 与第27章同一套设计)
++        bool valid = false;
++        int kind = 0;               // 0=消息边界 1=预填充末尾 2=生成末尾
++        int hits = 0;               // ★ 被命中过几次 —— 淘汰时【保护被命中过的】条目
++        std::string sid;
++        std::vector<int> ids;
++        int pos = 0;
++        uint64_t imgdep = 0;
++        int img_used = 0;
++        uint64_t last = 0;
++        std::vector<float> conv, S, logits;
++        std::vector<std::vector<float> > Kc, Vc;
++    };
++    static std::vector<CbSlot> g_slots;
++    static std::vector<CbReq>  g_squeue;
++    static std::vector<MCk>    g_mck;
++    static uint64_t g_mck_tick = 0, g_cb_steps = 0, g_cb_served = 0;
++    static bool g_cb_run = true;
++    static double g_cb_d2h = 0;
++
++    auto cb_state_mb = [&]() {
++        return (double)(NLAYER * 3 * CVD + NLAYER * NVH * VHD * KHD + (NLAYER / 4) * 2 * MAXT * NKV * HD) * 4 / 1048576.0;
++    };
++    auto cb_init = [&](int n) {
++        if (n < 0) n = 0;
++        if (n > 32) n = 32;
++        g_slots.clear(); g_slots.resize((size_t)n);
++        for (int i = 0; i < n; i++) {
++            CbSlot &S = g_slots[(size_t)i];
++            S.conv.assign((size_t)NLAYER * 3 * CVD, 0.f);
++            S.S.assign((size_t)NLAYER * NVH * VHD * KHD, 0.f);
++            S.Kc.resize(NLAYER); S.Vc.resize(NLAYER);
++            for (int l = 0; l < NLAYER; l++) if (!g_lay[l].recr) {
++                S.Kc[(size_t)l].assign((size_t)MAXT * NKV * HD, 0.f);
++                S.Vc[(size_t)l].assign((size_t)MAXT * NKV * HD, 0.f);
++            }
++            S.logits.assign((size_t)g_outw.M, 0.f);
++        }
++        const char *e = getenv("K200_CKPT");
++        int nc = e ? atoi(e) : 3;
++        if (nc < 0) nc = 0;
++        if (nc > 16) nc = 16;
++        g_mck.clear(); g_mck.resize((size_t)nc);
++        printf("[orn] ★ 多槽位(第29轮): %d 槽 x %.1f MB = %.0f MB; 前缀检查点表 %d 槽 (K200_CKPT)\n",
++               n, cb_state_mb(), n * cb_state_mb(), nc);
++    };
++    auto cb_bind = [&](CbSlot &S) {
++        g_pConv = &S.conv; g_pS = &S.S;
++        for (int l = 0; l < NLAYER; l++) { g_pKc[l] = &S.Kc[(size_t)l]; g_pVc[l] = &S.Vc[(size_t)l]; }
++        g_pImgemb = &S.imgemb; g_pImgn = &S.imgn; g_pImgused = &S.imgused;
++    };
++    auto cb_unbind = [&]() {
++        g_pConv = &g_st.conv; g_pS = &g_st.S;
++        for (int l = 0; l < NLAYER; l++) { g_pKc[l] = &g_lay[l].Kc; g_pVc[l] = &g_lay[l].Vc; }
++        g_pImgemb = &g_imgemb; g_pImgn = &g_img_n; g_pImgused = &g_img_used;
++    };
++    auto cb_mck_take = [&](CbSlot &S, const std::vector<int> &ids, int spos, const std::vector<float> &lg, int kind = 0) {
++        if (g_mck.empty() || spos <= 0 || (int)ids.size() < spos || S.sid.empty()) return;
++        int sl = -1;
++        for (size_t i = 0; i < g_mck.size(); i++)
++            if (g_mck[i].valid && g_mck[i].pos == spos && g_mck[i].sid == S.sid &&
++                std::equal(g_mck[i].ids.begin(), g_mck[i].ids.end(), ids.begin())) { sl = (int)i; break; }
++        if (sl < 0) for (size_t i = 0; i < g_mck.size(); i++) if (!g_mck[i].valid) { sl = (int)i; break; }
++        if (sl < 0) {
++            // ★ 淘汰策略 (实测修正): 先丢【从未被命中过】的条目里最旧的; 全部都被命中过才退回纯 LRU。
++            //   为什么: "同一段 base + 每轮只换最后一条问题" 这种形态 (DSH/多轮) 里,
++            //   唯一可复用的检查点是【base 里最后一条消息的边界】——它每一轮都会被命中;
++            //   而每轮新产生的"末尾边界/预填充末尾/生成末尾"从不会被命中。
++            //   只按 LRU 丢 ⇒ 恰好把那个被反复命中的边界挤掉 (实测第3~6轮退化成全量 8.4s)。
++            int besth = 1 << 30; sl = -1;
++            for (size_t i = 0; i < g_mck.size(); i++) if (g_mck[i].hits < besth) besth = g_mck[i].hits;
++            for (size_t i = 0; i < g_mck.size(); i++)
++                if (g_mck[i].hits == besth && (sl < 0 || g_mck[i].last < g_mck[(size_t)sl].last)) sl = (int)i;
++            if (sl < 0) sl = 0;
++        }
++        MCk &C = g_mck[(size_t)sl];
++        C.kind = kind;
++        C.sid = S.sid;
++        C.ids.assign(ids.begin(), ids.begin() + spos);
++        C.pos = spos;
++        C.conv = S.conv; C.S = S.S; C.logits = lg;
++        C.Kc.resize(NLAYER); C.Vc.resize(NLAYER);
++        size_t nr = (size_t)spos * NKV * HD;
++        for (int l = 0; l < NLAYER; l++)
++            if (!g_lay[l].recr) {
++                C.Kc[(size_t)l].assign(S.Kc[(size_t)l].begin(), S.Kc[(size_t)l].begin() + nr);
++                C.Vc[(size_t)l].assign(S.Vc[(size_t)l].begin(), S.Vc[(size_t)l].begin() + nr);
++            } else { std::vector<float>().swap(C.Kc[(size_t)l]); std::vector<float>().swap(C.Vc[(size_t)l]); }
++        C.img_used = S.imgused;
++        C.imgdep = 0;
++        if (S.imgn > 0 && g_img_pad >= 0)
++            for (int k = 0; k < spos; k++) if (C.ids[(size_t)k] == g_img_pad) { C.imgdep = S.imgid; break; }
++        C.last = ++g_mck_tick; C.valid = true;
++    };
++    auto cb_emit_fp = [&](CbSlot &S) {
++        uint64_t h1 = 1469598103934665603ULL, h2 = 1469598103934665603ULL, h3 = 1469598103934665603ULL;
++        for (size_t i = 0; i < S.emitted.size(); i++) { uint64_t v = (uint64_t)(uint32_t)S.emitted[i];
++            for (int b = 0; b < 4; b++) { h1 ^= (unsigned char)((v >> (b * 8)) & 0xFF); h1 *= 1099511628211ULL; } }
++        for (size_t i = 0; i < S.out.size(); i++) { h2 ^= (unsigned char)S.out[i]; h2 *= 1099511628211ULL; }
++        for (size_t i = 0; i < S.ids.size(); i++) { uint64_t v = (uint64_t)(uint32_t)S.ids[i];
++            for (int b = 0; b < 4; b++) { h3 ^= (unsigned char)((v >> (b * 8)) & 0xFF); h3 *= 1099511628211ULL; } }
++        printf("__SFP__ %d %d ids=%016llx bytes=%016llx prompt=%016llx(%d tok)\n", S.reqid, (int)S.emitted.size(),
++               (unsigned long long)h1, (unsigned long long)h2, (unsigned long long)h3, (int)S.ids.size());
++    };
++    auto cb_finish = [&](CbSlot &S, const char *why) {
++        if (!S.ids.empty() && S.pos > 0 && !S.genids.empty()) {      // 生成末尾检查点 (prompt+回答)
++            std::vector<int> full(S.ids);
++            full.insert(full.end(), S.genids.begin(), S.genids.end());
++            if ((int)full.size() == S.pos) { cb_bind(S); cb_mck_take(S, full, S.pos, S.logits, 2); cb_unbind(); }
++        }
++        S.t_done = NOWS_();
++        {   double pt = S.prefill_s, wt = S.t_done - S.t_admit;
++            printf("[orn] slot%d cid=%d 结束: prompt=%d tok 复用%d tok 预填充%.3fs | 生成 %d tok 用时%.2fs = %.3f tok/s | gemv %llu 次\n",
++                   (int)(&S - &g_slots[0]), S.reqid, (int)S.ids.size(), S.reused, pt, S.ntok, wt,
++                   S.ntok / (wt + 1e-9), (unsigned long long)g_gemv_n);
++        }
++        cb_emit_fp(S);
++        printf("__SDONE__ %d %s %d\n", S.reqid, why, S.ntok);
++        S.active = false; S.feed = false; S.used = false;
++        g_cb_served++;
++    };
++    auto cb_advance = [&](CbSlot &S) {   // 从当前 logits 出下一个 token —— 与 run_request 的 while 同序
++        S.feed = false;
++        if (S.ntok >= S.maxtok || S.pos >= MAXT) { cb_finish(S, (S.ntok >= S.maxtok) ? "length" : "MAXT"); return; }
++        int best = 0; float bv = S.logits[0];
++        for (size_t i = 1; i < S.logits.size(); i++) if (S.logits[i] > bv) { bv = S.logits[i]; best = (int)i; }
++        if (std::find(stops.begin(), stops.end(), best) != stops.end()) { cb_finish(S, "stop"); return; }
++        std::string tb = g_tk.decode_token(best, g_gguf.tokens);
++        printf("__STOK__ %d ", S.reqid);
++        for (size_t k = 0; k < tb.size(); k++) printf("%02x", (unsigned char)tb[k]);
++        printf("\n");
++        S.out += tb; S.ntok++; S.emitted.push_back(best);
++        if (S.ntok >= S.maxtok) { cb_finish(S, "length"); return; }
++        S.genids.push_back(best);
++        S.cur_tok = best;
++        S.feed = true;
++    };
++    // ---- 入槽 + 预填充 (+ 前缀复用) ----
++    auto cb_admit = [&](CbSlot &S, CbReq &R) {
++        S.used = true; S.active = true; S.solo = R.solo; S.reqid = R.cid; S.sid = R.sid;
++        S.maxtok = R.maxtok; S.ntok = 0; S.pos = 0; S.reused = 0; S.lcp_all = 0;
++        S.out.clear(); S.genids.clear(); S.emitted.clear();
++        S.ids = R.ids;
++        S.imgn = 0; S.imgused = 0; S.imgid = 0; S.imgemb.clear();
++        if (g_img_n > 0 && g_img_pad >= 0) {
++            bool need = false;
++            for (size_t i = 0; i < S.ids.size(); i++) if (S.ids[(size_t)i] == g_img_pad) { need = true; break; }
++            if (need) { S.imgemb = g_imgemb; S.imgn = g_img_n; S.imgid = g_img_id; S.imgused = 0; }
++        }
++        S.t_admit = NOWS_();
++        cb_bind(S);
++        int ck_hit = -1, ck_lcp = 0;
++        if (!S.ids.empty() && !S.sid.empty()) {
++            for (int ci = 0; ci < (int)g_mck.size(); ci++) {
++                MCk &C = g_mck[(size_t)ci];
++                if (!C.valid || C.pos <= 0) continue;
++                if (C.sid != S.sid) continue;
++                if (!(C.imgdep == 0 || C.imgdep == S.imgid)) continue;
++                int m = ((int)S.ids.size() < C.pos) ? (int)S.ids.size() : C.pos;
++                int n = 0; while (n < m && C.ids[(size_t)n] == S.ids[(size_t)n]) n++;
++                if (n > S.lcp_all) S.lcp_all = n;
++                if (n < C.pos) continue;
++                if (n > ck_lcp) { ck_lcp = n; ck_hit = ci; }
++            }
++            if (ck_hit >= 0) {
++                MCk &C = g_mck[(size_t)ck_hit];
++                S.conv = C.conv; S.S = C.S; S.logits = C.logits; S.imgused = C.img_used;
++                size_t nr = (size_t)C.pos * NKV * HD;
++                for (int l = 0; l < NLAYER; l++) if (!g_lay[l].recr) {
++                    memcpy(S.Kc[(size_t)l].data(), C.Kc[(size_t)l].data(), nr * 4);
++                    memcpy(S.Vc[(size_t)l].data(), C.Vc[(size_t)l].data(), nr * 4);
++                }
++                S.pos = C.pos; S.reused = C.pos;
++                C.last = ++g_mck_tick; C.hits++;     // ★ 命中计数 (淘汰时保护被复用过的检查点)
++            }
++        }
++        double t0 = NOWS_();
++        if (S.reused == 0) {
++            // ★★ 关键: 从零开始的预填充必须把【该槽上次请求残留的递推状态清零】——
++            //    老路径 run_request 里对应的就是 g_st.reset() (memset conv + S)。
++            //    漏了这一步 ⇒ 新请求会从上一条请求在【同一槽位】留下的
++            //    delta-net S / conv 残值继续递推 ⇒ 同一输入在不同槽位/不同历史下给出不同答案
++            //    (实测: "你好" 出现两个不同答案)。KV 不用清 (位置 0..pos 会被逐个覆盖)。
++            memset(S.conv.data(), 0, S.conv.size() * 4);
++            memset(S.S.data(), 0, S.S.size() * 4);
++            S.imgused = 0;
++        }
++        if (S.reused < (int)S.ids.size()) {
++            for (size_t i = (size_t)S.reused; i < S.ids.size(); ) {
++                if (S.pos >= MAXT) { S.ids.resize(i); break; }
++                size_t remain = S.ids.size() - i;
++                int T = 1;
++                if (remain >= (size_t)g_bmin) {
++                    T = (int)((remain > (size_t)g_bmax) ? g_bmax : remain);
++                    if (S.pos + T > MAXT) T = MAXT - S.pos;
++                }
++                if (im_start_id >= 0 && S.pos > 0 && S.ids[i] == im_start_id) cb_mck_take(S, S.ids, S.pos, S.logits, 0);
++                if (im_start_id >= 0 && T > 1)
++                    for (int q = 1; q < T; q++) if (S.ids[i + (size_t)q] == im_start_id) { T = q; break; }
++                if (T > 1) { forward_batch(&S.ids[i], T, S.pos, S.logits); S.pos += T; i += (size_t)T; }
++                else       { forward(S.ids[i], S.pos, S.logits);        S.pos += 1; i += 1; }
++            }
++            cb_mck_take(S, S.ids, S.pos, S.logits, 1);
++        }
++        S.prefill_s = NOWS_() - t0;
++        cb_unbind();
++        int newtok = (int)S.ids.size() - S.reused;
++        printf("[orn] slot%d cid=%d 入槽: prompt=%d tok 用时 %.3fs (%.1f ms/tok, %s 复用%d tok) 新增%d tok | gemv %llu 次 | 图像%d行 指纹%016llx\n",
++               (int)(&S - &g_slots[0]), S.reqid, (int)S.ids.size(), S.prefill_s,
++               S.prefill_s * 1000.0 / (double)(newtok > 0 ? newtok : 1),
++               (S.reused == 0 ? "全量" : (S.reused == (int)S.ids.size() ? "整段命中" : "部分前缀命中")),
++               S.reused, newtok, (unsigned long long)g_gemv_n, S.imgn, (unsigned long long)S.imgid);
++        {   int nv = 0; for (size_t i2 = 0; i2 < g_mck.size(); i2++) if (g_mck[i2].valid) nv++;
++            printf("[orn]   ★ 检查点表 %d/%d 有效; 本次最长公共前缀(lcp)=%d tok\n", nv, (int)g_mck.size(), S.lcp_all); }
++        printf("__SPREF__ %d reused=%d new=%d prefill_s=%.3f lcp=%d ptok=%d\n",
++               S.reqid, S.reused, newtok, S.prefill_s, S.lcp_all, (int)S.ids.size());
++        printf("__SACTIVE__ %d %d\n", S.reqid, (int)(&S - &g_slots[0]));
++        cb_advance(S);        // 预填充的 logits ⇒ 第一个 token (与 run_request 同序, 立刻发出)
++    };
++    auto cb_drain_queue = [&]() {
++        for (;;) {
++            if (g_squeue.empty()) return;
++            bool any_solo = false, que_solo = false;
++            int nact = 0;
++            for (size_t i = 0; i < g_slots.size(); i++)
++                if (g_slots[i].active) { nact++; if (g_slots[i].solo) any_solo = true; }
++            for (size_t i = 0; i < g_squeue.size(); i++) if (g_squeue[i].solo) que_solo = true;
++            int pick = -1, sl = -1;
++            for (size_t i = 0; i < g_squeue.size(); i++) {
++                CbReq &R = g_squeue[i];
++                if (R.solo) { if (nact > 0) continue; }
++                else        { if (any_solo || que_solo) continue; }
++                for (size_t s2 = 0; s2 < g_slots.size(); s2++) if (!g_slots[s2].used) { sl = (int)s2; break; }
++                if (sl >= 0) { pick = (int)i; break; }
++            }
++            if (pick < 0) return;
++            CbReq R = g_squeue[(size_t)pick];
++            g_squeue.erase(g_squeue.begin() + pick);
++            cb_admit(g_slots[(size_t)sl], R);
++        }
++    };
++    auto cb_step = [&]() {
++        std::vector<CbSlot *> act, solo_act;
++        for (size_t i = 0; i < g_slots.size(); i++)
++            if (g_slots[i].active && g_slots[i].feed) act.push_back(&g_slots[i]);
++        if (act.empty()) return;
++        bool any_solo = false;
++        for (size_t i = 0; i < act.size(); i++) if (act[i]->solo) any_solo = true;
++        if (any_solo) {                       // ★ solo 槽独占批 ⇒ 保证它 M=1
++            for (size_t i = 0; i < act.size(); i++) if (act[i]->solo) solo_act.push_back(act[i]);
++            act.swap(solo_act);
++            if (act.size() > 1) { std::vector<CbSlot *> one; one.push_back(act[0]); act.swap(one); }
++        }
++        double _t0 = NOWS_(); double _c0 = g_i8_t;
++        double _h0[10] = {g_p_ssm, g_p_att, g_p_lay, g_p_lm, g_p_emb, g_p_nrm, g_cb_d2h, g_g_h2d, g_g_d2h, g_g_wait};
++        forward_multi(act);
++        if (g_prof >= 1) {
++            static int _cbpr = 0; static double _cbacc = 0, _cbcard = 0;
++            static double _cbh[10] = {0};
++            _cbacc += NOWS_() - _t0; _cbcard += g_i8_t - _c0;
++            _cbh[0] += g_p_ssm - _h0[0]; _cbh[1] += g_p_att - _h0[1]; _cbh[2] += g_p_lay - _h0[2];
++            _cbh[3] += g_p_lm - _h0[3];   _cbh[4] += g_p_emb - _h0[4]; _cbh[5] += g_p_nrm - _h0[5];
++            _cbh[6] += g_cb_d2h - _h0[6]; _cbh[7] += g_g_h2d - _h0[7]; _cbh[8] += g_g_d2h - _h0[8];
++            _cbh[9] += g_g_wait - _h0[9];
++            if (++_cbpr >= 10) {
++                double n = _cbpr;
++                printf("[orn][CBSTEP] 均步: M=%d 墙钟 %.2f ms = 卡gemm %.2f + 主机 %.2f [SSM%.2f 注意力%.2f 层内%.2f lm%.2f 嵌入%.2f 归一%.2f] | 卡四段 H2D%.2f launch+wait%.2f D2H%.2f | 控制侧logits搬运 %.2f ms\n",
++                       (int)act.size(), _cbacc * 1000 / n, _cbcard * 1000 / n, (_cbacc - _cbcard) * 1000 / n,
++                       _cbh[0] * 1000 / n, _cbh[1] * 1000 / n, _cbh[2] * 1000 / n, _cbh[3] * 1000 / n,
++                       _cbh[4] * 1000 / n, _cbh[5] * 1000 / n,
++                       _cbh[7] * 1000 / n, _cbh[9] * 1000 / n, _cbh[8] * 1000 / n, _cbh[6] * 1000 / n);
++                fflush(stdout);
++                _cbpr = 0; _cbacc = 0; _cbcard = 0;
++                for (int z = 0; z < 10; z++) _cbh[z] = 0;
++            }
++        }
++        const size_t V = (size_t)g_outw.M;
++        for (size_t i = 0; i < act.size(); i++) {
++            CbSlot *S = act[i];
++            double _dt = NOWS_();
++            S->logits.assign(g_mLOG.begin() + (ptrdiff_t)(i * V), g_mLOG.begin() + (ptrdiff_t)((i + 1) * V));
++            g_cb_d2h += NOWS_() - _dt;
++            S->pos++;
++            cb_advance(*S);
++        }
++        g_cb_steps++;
++    };
++    auto cb_busy = [&]() {
++        if (!g_squeue.empty()) return true;
++        for (size_t i = 0; i < g_slots.size(); i++) if (g_slots[i].active) return true;
++        return false;
++    };
+     {
+-        char *line = NULL; size_t cap = 0;
+-        while (getline(&line, &cap, stdin) > 0) {
+-            std::string s(line);
+-            while (!s.empty() && (s[s.size()-1] == '\n' || s[s.size()-1] == '\r')) s.erase(s.size()-1);
+-            if (!s.empty() && s[0] == '!') {                 // ★ VIS 命令
++        const char *e = getenv("K200_SLOTS");
++        int n = e ? atoi(e) : 0;
++        cb_init(n);
++        if (n == 0) printf("[orn] ★ 多槽位未启用 (K200_SLOTS=0): 只有老单会话 \"@\" 协议可用\n");
++    }
++
++    {   // ==================== 服务循环 ====================
++        auto handle_cmd = [&](std::string &s) {
++            if (!s.empty() && s[0] == '!') {                 // ★ 命令
+                 if (s.compare(0, 5, "!VIS ") == 0) {
+                     char vp[512]; int vW = 0, vH = 0;
+                     if (sscanf(s.c_str() + 5, "%511s %d %d", vp, &vW, &vH) == 3) vis_cmd(vp, vW, vH);
+@@ -2130,34 +2742,138 @@
+                     printf("__VISIMG__ %d %016llx\n", g_img_n, (unsigned long long)g_img_id);
+                 } else if (s.compare(0, 7, "!VISQ  ") == 0) {
+                     printf("__VISQ__ %d %d\n", vis_loaded(), g_img_n);
++                } else if (s.compare(0, 6, "!SLOTS") == 0) {
++                    int n = 0; sscanf(s.c_str() + 6, "%d", &n);
++                    cb_init(n);
++                    printf("__SLOTS__ %d state_mb=%.1f\n", (int)g_slots.size(), g_slots.size() * cb_state_mb());
++                } else if (s.compare(0, 5, "!SMCK") == 0) {
++                    printf("__SMCK__ n=%d\n", (int)g_mck.size());
++                    for (size_t i2 = 0; i2 < g_mck.size(); i2++) {
++                        MCk &C = g_mck[i2];
++                        printf("__SMCKROW__ %d valid=%d kind=%d pos=%d sid=%s ids=%d kv0=%d last=%llu\n",
++                               (int)i2, (int)C.valid, C.kind, C.pos, C.sid.c_str(), (int)C.ids.size(),
++                               C.Kc.empty() ? 0 : (int)C.Kc[3].size(), (unsigned long long)C.last);
++                    }
++                    printf("__SMCKEND__\n");
++                } else if (s.compare(0, 6, "!SSTAT") == 0) {
++                    int na = 0, nf = 0;
++                    for (size_t i = 0; i < g_slots.size(); i++) { if (g_slots[i].active) na++; if (!g_slots[i].used) nf++; }
++                    printf("__SSTAT__ slots=%d active=%d free=%d queued=%d steps=%llu served=%llu\n",
++                           (int)g_slots.size(), na, nf, (int)g_squeue.size(),
++                           (unsigned long long)g_cb_steps, (unsigned long long)g_cb_served);
++                } else if (s.compare(0, 6, "!SPAUS") == 0) {
++                    g_cb_run = false; printf("__SPAUSE__ ok\n");
++                } else if (s.compare(0, 7, "!SRESUM") == 0) {
++                    g_cb_run = true; printf("__SRESUME__ ok\n");
++                } else if (s.compare(0, 5, "!SADD") == 0) {
++                    std::vector<std::string> tk; std::string r = s.substr(5);
++                    {   size_t i = 0;
++                        while (i < r.size()) {
++                            while (i < r.size() && r[i] == ' ') i++;
++                            size_t j = i;
++                            while (j < r.size() && r[j] != ' ') j++;
++                            if (j > i) tk.push_back(r.substr(i, j - i));
++                            i = j;
++                        }
++                    }
++                    if (tk.size() < 3) { printf("__SREJ__ 0 bad-args\n"); fflush(stdout); return; }
++                    int cid = atoi(tk[0].c_str());
++                    int mt  = atoi(tk[1].c_str());
++                    std::string sid, b64; uint64_t want_img = 0; int solo = 0;
++                    for (size_t k = 2; k < tk.size(); k++) {
++                        const std::string &t = tk[k];
++                        if (t.rfind("sid=", 0) == 0) { sid = t.substr(4); if (sid == "-") sid.clear(); }  // ★ "-" = 无会话 ⇒ 不参与前缀复用
++                        else if (t.rfind("img=", 0) == 0) want_img = (uint64_t)strtoull(t.c_str() + 4, NULL, 16);
++                        else if (t.rfind("solo=", 0) == 0) solo = atoi(t.c_str() + 5);
++                        else if (t.rfind("b64:", 0) == 0) b64 = t.substr(4);
++                    }
++                    static const char *T64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++                    int rev[256]; for (int i = 0; i < 256; i++) rev[i] = -1;
++                    for (int i = 0; i < 64; i++) rev[(unsigned char)T64[i]] = i;
++                    std::string pr; int val = 0, bits = 0;
++                    for (size_t i = 0; i < b64.size(); i++) {
++                        if (b64[i] == '=') break;
++                        int c = rev[(unsigned char)b64[i]]; if (c < 0) continue;
++                        val = ((val << 6) | c) & 0xFFFFFF; bits += 6;
++                        if (bits >= 8) { bits -= 8; pr += (char)((val >> bits) & 0xFF); }
++                    }
++                    if (g_slots.empty()) { printf("__SREJ__ %d no-slots\n", cid); fflush(stdout); return; }
++                    CbReq R; R.cid = cid; R.maxtok = (mt > 0) ? mt : 64; R.solo = (solo != 0); R.sid = sid;
++                    R.want_img = want_img;
++                    R.ids = g_tk.encode(pr);
++                    {   uint64_t ikey = 0;
++                        if (g_img_n > 0 && g_img_pad >= 0)
++                            for (size_t i = 0; i < R.ids.size(); i++) if (R.ids[(size_t)i] == g_img_pad) { ikey = g_img_id; break; }
++                        if (ikey != 0 && want_img != 0 && ikey != want_img) {
++                            printf("__SREJ__ %d image-mismatch want=%016llx have=%016llx\n", cid,
++                                   (unsigned long long)want_img, (unsigned long long)ikey);
++                            fflush(stdout); return;
++                        }
++                        if (ikey != 0 && g_img_n <= 0) { printf("__SREJ__ %d no-image\n", cid); fflush(stdout); return; }
++                    }
++                    g_squeue.push_back(R);
++                    printf("__SADD__ %d queued ptok=%d maxtok=%d solo=%d sid=%s\n",
++                           cid, (int)R.ids.size(), R.maxtok, (int)R.solo, R.sid.c_str());
++                } else if (s.compare(0, 5, "!SDEL") == 0) {
++                    int cid = atoi(s.c_str() + 5); int ok = 0;
++                    for (size_t i = 0; i < g_squeue.size(); i++) if (g_squeue[i].cid == cid) { g_squeue.erase(g_squeue.begin() + i); ok = 1; break; }
++                    for (size_t i = 0; i < g_slots.size(); i++) if (g_slots[i].used && g_slots[i].reqid == cid) {
++                        g_slots[i].used = false; g_slots[i].active = false; g_slots[i].feed = false; ok = 1; }
++                    printf("__SDEL__ %d %s\n", cid, ok ? "ok" : "notfound");
+                 } else {
+                     printf("__VIS__ ERR 未知命令\n");
+                 }
+                 fflush(stdout);
+-                continue;
++                return;
+             }
+-            if (s.size() < 3 || s[0] != '@') continue;
++            if (s.size() < 3 || s[0] != '@') return;
+             size_t p2 = s.find('@', 1);
+-            if (p2 == std::string::npos) continue;
++            if (p2 == std::string::npos) return;
+             int mt = atoi(s.substr(1, p2 - 1).c_str());
+             std::string rest = s.substr(p2 + 1), sid;
+             if (rest.rfind("sid=", 0) == 0) { size_t p3 = rest.find('@', 0); sid = rest.substr(4, p3 - 4); rest = (p3 == std::string::npos) ? std::string() : rest.substr(p3 + 1); }
+             std::string b64 = rest;
+             if (b64.rfind("b64:", 0) == 0) b64 = b64.substr(4);
+-        // base64 解码
+-        static const char *T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+-        int rev[256]; for (int i = 0; i < 256; i++) rev[i] = -1;
+-        for (int i = 0; i < 64; i++) rev[(unsigned char)T[i]] = i;
+-        std::string pr; int val = 0, bits = 0;
+-        for (size_t i = 0; i < b64.size(); i++) {
+-            if (b64[i] == '=') break;
+-            int c = rev[(unsigned char)b64[i]]; if (c < 0) continue;
+-            val = ((val << 6) | c) & 0xFFFFFF; bits += 6;
+-            if (bits >= 8) { bits -= 8; pr += (char)((val >> bits) & 0xFF); }
+-        }
+-        printf("__BEGIN__\n");
++            static const char *T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++            int rev[256]; for (int i = 0; i < 256; i++) rev[i] = -1;
++            for (int i = 0; i < 64; i++) rev[(unsigned char)T[i]] = i;
++            std::string pr; int val = 0, bits = 0;
++            for (size_t i = 0; i < b64.size(); i++) {
++                if (b64[i] == '=') break;
++                int c = rev[(unsigned char)b64[i]]; if (c < 0) continue;
++                val = ((val << 6) | c) & 0xFFFFFF; bits += 6;
++                if (bits >= 8) { bits -= 8; pr += (char)((val >> bits) & 0xFF); }
++            }
++            cb_unbind();       // ★ 老路径必须作用在【全局单会话状态】上
++            printf("__BEGIN__\n");
+             run_request(pr, mt, true, sid);
+             printf("__END__\n");
++        };
++        std::string inbuf;
++        std::vector<char> rbuf(65536);
++        for (;;) {
++            bool busy = g_cb_run && cb_busy();
++            struct pollfd pf; pf.fd = 0; pf.events = POLLIN; pf.revents = 0;
++            int pr = poll(&pf, 1, busy ? 0 : -1);
++            if (pr < 0) { if (errno == EINTR) continue; break; }
++            if (pr > 0 && (pf.revents & (POLLIN | POLLHUP))) {
++                ssize_t n = read(0, &rbuf[0], rbuf.size());
++                if (n <= 0) break;
++                inbuf.append(&rbuf[0], (size_t)n);
++            }
++            size_t nl;
++            while ((nl = inbuf.find('\n')) != std::string::npos) {
++                std::string s = inbuf.substr(0, nl);
++                inbuf.erase(0, nl + 1);
++                while (!s.empty() && (s[s.size() - 1] == '\r' || s[s.size() - 1] == ' ')) s.erase(s.size() - 1);
++                if (!s.empty()) handle_cmd(s);
++            }
++            if (inbuf.size() > ((size_t)8 << 20)) inbuf.clear();     // 防御: 超长无换行的垃圾
++            if (g_cb_run) {
++                if (!g_squeue.empty()) cb_drain_queue();
++                if (cb_busy()) cb_step();
++            }
++            fflush(stdout);
+         }
+     }
+     return 0;

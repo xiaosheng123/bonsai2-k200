@@ -1,0 +1,22 @@
+// 可变 local 大小的单 kernel 模块 (配套 probe_lm.sh, 用 sed 生成不同 32)
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+__global__ void lm_k(const unsigned char *W, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    __local__ unsigned char buf[32 * 1024];
+    GM2LM(W, buf, 32 * 1024);
+    int acc = 0;
+    for (int i = 0; i < 32 * 1024; i += 512) acc += buf[i];
+    out[tid] = (float)acc;
+}
+void run_lm(const void *W, void *out, int cl, int co) {
+    lm_k<<<cl, co>>>((const unsigned char *)W, (float *)out);
+}
+
+__global__ void map_k(int *o) {
+    int c = cluster_id(), k = core_id();
+    if (c < 16 && k < 64) o[c * 64 + k] = c * 100 + k + 1;
+}
+void run_map(int *o, int cl, int co) { map_k<<<cl, co>>>(o); }

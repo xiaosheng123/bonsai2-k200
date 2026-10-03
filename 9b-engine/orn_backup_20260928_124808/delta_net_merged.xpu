@@ -1,0 +1,117 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+
+// ==== merged kernel: pack loads to cut GM2LM calls ====
+// Host layout per t per hv (2 heads per core):
+//   struct Packed { float g[2]; float b[2]; float k[2][KHD]; float q[2][KHD]; float v[2][VHD]; };
+// Total = 8 + 1024 + 1024 + 1024 = 3080 bytes per hv-pair (but we do 1 hv at a time in loop)
+// Actually simpler: per hv: { float g, b; float k[KHD]; float q[KHD]; float v[VHD]; } = 1544B
+// S block per hv per core: RPC*KHD = 1024 floats = 4096B. Two hv = 8192B (fits in 7.5KB? No, 8KB > 7.5KB).
+// So we keep S load/store per hv separate (already hoisted), but merge g/b/k/q/v per hv per t.
+
+// Packed input pointer: for each t, the host provides a contiguous array for this core's hv range:
+//   packed_in[t][hv_index][1544/4 floats]
+// But to minimize host change, we just merge g+b (contiguous in gT/bT if host interleaves),
+// and merge k+q (need host to pack), and v separate.
+
+// ---- Simpler: only merge g+b (1 GM2LM) and k+q (1 GM2LM if host packs), v stays ----
+// This gives 3 GM2LM/hv/t vs 5. With 2 hv = 6 vs 10.
+// S load/store already hoisted (2 GM2LM/hv total, not per t).
+
+// Let's do the full merge: host packs per hv per t: [g, b, k[128], q[128], v[128]] = 1544B
+// Kernel loads this in ONE GM2LM per hv per t.
+
+#define PACKED_PER_HV (2 + KHD + KHD + VHD)  // 2 + 128 + 128 + 128 = 386 floats = 1544 bytes
+#define S_PER_HV (RPC * KHD)  // 1024 floats = 4096 bytes
+
+__global__ void dn_k_T_merged(
+    float *S,                 // [NVH][VHD][KHD] - persistent on device
+    const float *packed_in,   // [T][NVH][PACKED_PER_HV] - host packs g,b,k,q,v contiguously per hv per t
+    float *outT,              // [T][NVH][VHD]
+    int T
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;
+
+    // Local buffers - reuse across hv and t
+    __local__ float kl[KHD];
+    __local__ float ql[KHD];
+    __local__ float vl[VHD];
+    __local__ float lr[RPC][KHD];
+    __local__ float ob[RPC];
+    __local__ float packed_l[PACKED_PER_HV];  // 386 floats = 1544B
+
+    float qscale = 1.0f / sqrt((float)KHD);
+    int r0 = cid * RPC;
+
+    for (int hv = hstart; hv < hend; hv++) {
+        int hk = hv % 16;
+        __global_ptr__ float *sp = S + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+        
+        // Load S for this hv (once per hv, hoisted out of t-loop)
+        GM2LM(sp, lr, S_PER_HV * 4);
+
+        for (int t = 0; t < T; t++) {
+            // Single merged load: g, b, k[128], q[128], v[128]
+            __global_ptr__ const float *src = packed_in + (size_t)t * NVH * PACKED_PER_HV + (size_t)hv * PACKED_PER_HV;
+            GM2LM(src, packed_l, PACKED_PER_HV * 4);
+
+            // Unpack
+            float eg = packed_l[0];
+            float bb = packed_l[1];
+            float *kp = packed_l + 2;
+            float *qp = packed_l + 2 + KHD;
+            float *vp = packed_l + 2 + KHD + KHD;
+
+            // Copy to working buffers - explicit loops to avoid memcpy builtin
+            for (int i = 0; i < KHD; i++) { kl[i] = kp[i]; }
+            for (int i = 0; i < KHD; i++) { ql[i] = qp[i]; }
+            for (int i = 0; i < VHD; i++) { vl[i] = vp[i]; }
+
+            for (int rr = 0; rr < RPC; rr++) {
+                int row = r0 + rr;
+                // 段1: 位级同 CPU — a0 = r*eg (写回), sk += a0*k, i 升序单累加器
+                float sk = 0.f;
+                for (int i = 0; i < KHD; i++) {
+                    float a0 = lr[rr][i] * eg;
+                    lr[rr][i] = a0;
+                    sk += a0 * kl[i];
+                }
+                float d = (vl[row] - sk) * bb;
+                // 段2: u = r + k*d (写回), so += u*q, i 升序单累加器
+                float so = 0.f;
+                for (int i = 0; i < KHD; i++) {
+                    float a0 = lr[rr][i] + kl[i] * d;
+                    lr[rr][i] = a0;
+                    so += a0 * ql[i];
+                }
+                ob[rr] = so * qscale;
+            }
+            // Store output
+            __global_ptr__ float *ot = outT + ((size_t)t * NVH + hv) * VHD + r0;
+            LM2GM(ob, ot, RPC * 4);
+        }
+        // Store S for this hv (once per hv)
+        LM2GM(lr, sp, S_PER_HV * 4);
+    }
+}
+
+void run_delta_net_batch_merged(
+    int clusters, int cores, int T,
+    float *S, const float *packed_in, float *outT
+) {
+    dn_k_T_merged<<<clusters, cores>>>(S, packed_in, outT, T);
+}
+

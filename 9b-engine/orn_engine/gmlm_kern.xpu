@@ -1,0 +1,24 @@
+// gmlm_kern.xpu — 纯 device kernel: GM2LM 延迟基准
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+__global__ void gm2lm_bench(float *src, float *dst, int loops, int bytes) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    int tid = cl * 16 + cid;
+    __local__ float buf[16384];  // 64KB max
+    __global_ptr__ float *d = dst + (size_t)tid * 16384;
+    for (int it = 0; it < loops; it++) {
+        GM2LM(src + (size_t)tid * 16384, buf, bytes);
+        float s = 0;
+        for (int i = 0; i < bytes/4; i += 4) s += buf[i];
+        LM2GM(&s, d + it, 4);
+    }
+}
+
+void run_gm2lm_bench(int clusters, int cores, int loops, int bytes,
+                     float *src, float *dst) {
+    gm2lm_bench<<<clusters, cores>>>(src, dst, loops, bytes);
+}

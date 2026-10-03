@@ -1,0 +1,173 @@
+{
+ "tag": "BEFORE1024",
+ "items": [
+  {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 1.3,
+    "wall_secs": 1.3,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 6.9041,
+    "prompt_chars": 71,
+    "nothink": true,
+    "sid": "440ee0853ad1e99f",
+    "prompt_tokens": 13,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=13 tok 用时 0.75s (58.0 ms/tok, 全量 复用0 tok) | 生成 9 tok 用时 0.52s = 17.360 tok/s | gemv 65669 次"
+   },
+   "usage": {
+    "prompt_tokens": 13,
+    "completion_tokens": 9,
+    "total_tokens": 22
+   },
+   "wall": 1.31,
+   "name": "golden"
+  },
+  {
+   "text": "7",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 10.98,
+    "wall_secs": 10.98,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.0911,
+    "prompt_chars": 830,
+    "nothink": true,
+    "sid": "36cd02e52d59e10a",
+    "prompt_tokens": 421,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=421 tok 用时 10.72s (25.5 ms/tok, 全量 复用0 tok) | 生成 1 tok 用时 0.07s = 14.675 tok/s | gemv 65805 次"
+   },
+   "usage": {
+    "prompt_tokens": 421,
+    "completion_tokens": 1,
+    "total_tokens": 422
+   },
+   "wall": 10.99,
+   "name": "long14_messages"
+  },
+  {
+   "text": "15",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 11.02,
+    "wall_secs": 11.02,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.1814,
+    "prompt_chars": 729,
+    "nothink": true,
+    "sid": "c159ee262efea973",
+    "prompt_tokens": 406,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=406 tok 用时 10.56s (26.0 ms/tok, 全量 复用0 tok) | 生成 2 tok 用时 0.13s = 15.522 tok/s | gemv 66070 次"
+   },
+   "usage": {
+    "prompt_tokens": 406,
+    "completion_tokens": 2,
+    "total_tokens": 408
+   },
+   "wall": 11.02,
+   "name": "plain_k20"
+  },
+  {
+   "text": "15",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 34.77,
+    "wall_secs": 34.77,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.0575,
+    "prompt_chars": 1689,
+    "nothink": true,
+    "sid": "28f1434a0390453f",
+    "prompt_tokens": 976,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=976 tok 用时 32.59s (33.4 ms/tok, 全量 复用0 tok) | 生成 2 tok 用时 0.18s = 10.938 tok/s | gemv 66344 次"
+   },
+   "usage": {
+    "prompt_tokens": 976,
+    "completion_tokens": 2,
+    "total_tokens": 978
+   },
+   "wall": 34.77,
+   "name": "plain_k50"
+  },
+  {
+   "text": "",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 4.85,
+    "wall_secs": 38.99,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.0,
+    "prompt_chars": 2649,
+    "nothink": true,
+    "sid": "49d9c8ea41b36902",
+    "prompt_tokens": 962,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=962 tok 用时 33.71s (35.0 ms/tok, 全量 复用0 tok) | 生成 62 tok 用时 5.25s = 11.814 tok/s | gemv 74615 次"
+   },
+   "usage": {
+    "prompt_tokens": 962,
+    "completion_tokens": 0,
+    "total_tokens": 962
+   },
+   "wall": 38.99,
+   "name": "plain_k80"
+  },
+  {
+   "text": "你好！👋\n\n我是 **Minis**，运行在一台 Android 设备上（Alpine Linux via PRoot，aarch64 架构）。我可以直接用 shell 命令帮你干活，不只是聊天。\n\n## 我能做什么\n\n**📦 安装和管理软件**\n```",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 36.68,
+    "wall_secs": 77.31,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 1.6901,
+    "prompt_chars": 3129,
+    "nothink": true,
+    "sid": "71458ab026d084ee",
+    "prompt_tokens": 962,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=962 tok 用时 31.57s (32.8 ms/tok, 全量 复用0 tok) | 生成 62 tok 用时 5.09s = 12.177 tok/s | gemv 82902 次"
+   },
+   "usage": {
+    "prompt_tokens": 962,
+    "completion_tokens": 62,
+    "total_tokens": 1024
+   },
+   "wall": 77.31,
+   "name": "plain_k95"
+  },
+  {
+   "text": "",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 5.16,
+    "wall_secs": 82.1,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.0,
+    "prompt_chars": 830,
+    "nothink": true,
+    "sid": "36cd02e52d59e10a",
+    "prompt_tokens": 962,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=962 tok 用时 34.31s (35.7 ms/tok, 全量 复用0 tok) | 生成 62 tok 用时 5.62s = 11.040 tok/s | gemv 91189 次"
+   },
+   "usage": {
+    "prompt_tokens": 962,
+    "completion_tokens": 0,
+    "total_tokens": 962
+   },
+   "wall": 82.11,
+   "name": "sess_t1"
+  }
+ ]
+}

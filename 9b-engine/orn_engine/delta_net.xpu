@@ -1,0 +1,155 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+
+// ==== v2 (2026-09-26): 位级一致修复 ====
+// 1) eg/b 由 host 预算传入 (g 参数 = expf(g_) 已算好), kernel 不再 exp => 与 CPU 同源
+// 2) 归约改严格 i 升序单累加器 (与 CPU [pipe] 路径逐元素同序), 消除树形归约漂移
+// 3) qscale = 1/sqrtf(128) 为 IEEE 正确舍入 sqrt => kernel 与 host 同值, 保留内算
+
+// ---- single-step kernel ----
+__global__ void dn_k(
+    float *S, const float *k, const float *v, const float *q,
+    const float *g, const float *b, float *out)
+{
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;
+
+    __local__ float gl[NVH];
+    __local__ float bl[NVH];
+    __local__ float kl[KHD];
+    __local__ float ql[KHD];
+    __local__ float vl[VHD];
+    __local__ float lr[RPC][KHD];
+    __local__ float ob[RPC];
+
+    GM2LM(g, gl, NVH * 4);
+    GM2LM(b, bl, NVH * 4);
+    float qscale = 1.0f / sqrt((float)KHD);
+    int r0 = cid * RPC;
+
+    for (int hv = hstart; hv < hend; hv++) {
+        int hk = hv % 16;
+        __global_ptr__ const float *kp = k + (size_t)hv * NC * KHD + (size_t)hk * KHD;
+        __global_ptr__ const float *qp = q + (size_t)hv * NC * KHD + (size_t)hk * KHD;
+        __global_ptr__ const float *vp = v + (size_t)hv * VHD;
+        __global_ptr__ float *sp = S + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+        __global_ptr__ float *op = out + (size_t)hv * VHD + r0;
+        GM2LM(kp, kl, KHD * 4);
+        GM2LM(qp, ql, KHD * 4);
+        GM2LM(vp, vl, VHD * 4);
+        GM2LM(sp, lr, RPC * KHD * 4);
+        float eg = gl[hv];   // host 预算的 expf(g_)
+        float bb = bl[hv];
+        for (int rr = 0; rr < RPC; rr++) {
+            int row = r0 + rr;
+            // 段1: 位级同 CPU — a0 = r*eg (写回), sk += a0*k, i 升序单累加器
+            float sk = 0.f;
+            for (int i = 0; i < KHD; i++) {
+                float a0 = lr[rr][i] * eg;
+                lr[rr][i] = a0;
+                sk += a0 * kl[i];
+            }
+            float d = (vl[row] - sk) * bb;
+            // 段2: u = r + k*d (写回), so += u*q, i 升序单累加器
+            float so = 0.f;
+            for (int i = 0; i < KHD; i++) {
+                float a0 = lr[rr][i] + kl[i] * d;
+                lr[rr][i] = a0;
+                so += a0 * ql[i];
+            }
+            ob[rr] = so * qscale;
+        }
+        LM2GM(lr, sp, RPC * KHD * 4);
+        LM2GM(ob, op, RPC * 4);
+    }
+}
+
+// ---- batched kernel: T tokens in one launch, S persists on device ----
+// kT[t][16][KHD]  vT[t][hv][VHD]  qT[t][16][KHD]  gT[t][hv](=eg)  bT[t][hv]  outT[t][hv][VHD]
+__global__ void dn_k_T(
+    float *S, const float *kT, const float *vT, const float *qT,
+    const float *gT, const float *bT, float *outT, int T)
+{
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;
+
+    __local__ float kl[KHD];
+    __local__ float ql[KHD];
+    __local__ float vl[VHD];
+    __local__ float lr[RPC][KHD];
+    __local__ float ob[RPC];
+    __local__ float gtl, btl;
+    float qscale = 1.0f / sqrt((float)KHD);
+    int r0 = cid * RPC;
+
+    for (int hv = hstart; hv < hend; hv++) {
+        int hk = hv % 16;
+        __global_ptr__ float *sp = S + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+        GM2LM(sp, lr, RPC * KHD * 4);
+        for (int t = 0; t < T; t++) {
+            __global_ptr__ const float *kp = kT + (size_t)t * NC * KHD + (size_t)hk * KHD;
+            __global_ptr__ const float *qp = qT + (size_t)t * NC * KHD + (size_t)hk * KHD;
+            __global_ptr__ const float *vp = vT + ((size_t)t * NVH + hv) * VHD;
+            GM2LM(gT + (size_t)t * NVH + hv, &gtl, 4);
+            GM2LM(bT + (size_t)t * NVH + hv, &btl, 4);
+            float eg = gtl;   // host 预算
+            float bb = btl;
+            GM2LM(kp, kl, KHD * 4);
+            GM2LM(qp, ql, KHD * 4);
+            GM2LM(vp, vl, VHD * 4);
+            for (int rr = 0; rr < RPC; rr++) {
+                int row = r0 + rr;
+                float sk = 0.f;
+                for (int i = 0; i < KHD; i++) {
+                    float a0 = lr[rr][i] * eg;
+                    lr[rr][i] = a0;
+                    sk += a0 * kl[i];
+                }
+                float d = (vl[row] - sk) * bb;
+                float so = 0.f;
+                for (int i = 0; i < KHD; i++) {
+                    float a0 = lr[rr][i] + kl[i] * d;
+                    lr[rr][i] = a0;
+                    so += a0 * ql[i];
+                }
+                ob[rr] = so * qscale;
+            }
+            __global_ptr__ float *ot = outT + ((size_t)t * NVH + hv) * VHD + r0;
+            LM2GM(ob, ot, RPC * 4);
+        }
+        LM2GM(lr, sp, RPC * KHD * 4);
+    }
+}
+
+void run_delta_net(
+    int clusters, int cores,
+    float *S, const float *k, const float *v, const float *q,
+    const float *g, const float *b, float *out)
+{
+    dn_k<<<clusters, cores>>>(S, k, v, q, g, b, out);
+}
+
+void run_delta_net_batch(
+    int clusters, int cores, int T,
+    float *S, const float *kT, const float *vT, const float *qT,
+    const float *gT, const float *bT, float *outT)
+{
+    dn_k_T<<<clusters, cores>>>(S, kT, vT, qT, gT, bT, outT, T);
+}

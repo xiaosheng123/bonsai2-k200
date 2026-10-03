@@ -1,0 +1,21 @@
+// sync_test.xpu — 纯 device: 同步 GM2LM 4KB 验证 (模拟 multi kernel 的正确搬运)
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+__global__ void sync_verify(float *src, float *dst) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    int tid = cl * 16 + cid;
+    __local__ float buf[4096];   // 16KB (足够大)
+    // 同步 GM2LM 4KB
+    GM2LM(src + (size_t)tid * 1024, buf, 4096);
+    float s = 0;
+    for (int i = 0; i < 1024; i++) s += buf[i] * 1.0001f;
+    LM2GM(&s, dst + tid, 4);
+}
+
+void run_sync_verify(int clusters, int cores, float *src, float *dst) {
+    sync_verify<<<clusters, cores>>>(src, dst);
+}

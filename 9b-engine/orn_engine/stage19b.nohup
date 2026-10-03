@@ -1,0 +1,73 @@
+########## caself2 05:26:28 ##########
+[stage19b] caself2 safe_run rc=0
+########## n768card2 05:26:31 ##########
+[stage19b] n768card2 safe_run rc=0
+########## n512card2 05:26:54 ##########
+[stage19b] n512card2 safe_run rc=0
+=== 安装 orn3.new19 -> orn3 (05:27:06) ===
+e0ad8d24797bf0d935af04bdf74938f1  orn3
+dfe74198c8c35f2dfdc442b288448f5b  vis.cpp
+[stage19b] READY: {"status": "ok", "engine": "alive", "ready": true, "note": "", "model": "ornith-1.5-9b-k200", "requests": 0, "tok_total": 0, "gen_secs": 0.0, "tok_per_s": null}
+=== 1) 512² 图形/颜色 05:28:19 ===
+图 = /home/caden/ornc/mmtests/img_shapes.png
+问 = 图里有什么？用中文简短回答，说出形状和颜色。
+答原文 = '图里有三个形状：\n\n- 红色圆形\n- 绿色正方形\n- 蓝色三角形'
+k200 = {"gen_secs": 9.29, "wall_secs": 9.29, "vision_tokens": [256], "image_encode": "[vis] 完成: 256 token, 总耗时 6.80s (gemm 2.24s, host 0.33s)", "tok_per_s": 2.1527, "prompt_chars": 3449, "nothink": true, "sid": "2680a8c255130810", "prompt_tokens": 284, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=284 tok 用时 7.84s (27.6 ms/tok, 全量 复用0 tok) | 生成 20 tok 用时 1.37s = 14.639 tok/s | gemv 2585 次"}
+usage = {"prompt_tokens": 284, "completion_tokens": 20, "total_tokens": 304}
+墙钟 18.79s
+=== 2) 512² 文字图 05:28:38 ===
+图 = /home/caden/ornc/mmtests/img_text.png
+问 = 图中写的文字是什么？请只回答文字内容。
+答原文 = 'K2O'
+k200 = {"gen_secs": 8.38, "wall_secs": 8.38, "vision_tokens": [256], "image_encode": "[vis] 完成: 256 token, 总耗时 6.86s (gemm 4.51s, host 0.70s)", "tok_per_s": 0.3582, "prompt_chars": 3446, "nothink": true, "sid": "618d877db0046fb6", "prompt_tokens": 281, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=281 tok 用时 8.15s (29.0 ms/tok, 全量 复用0 tok) | 生成 3 tok 用时 0.20s = 15.034 tok/s | gemv 2977 次"}
+usage = {"prompt_tokens": 281, "completion_tokens": 3, "total_tokens": 284}
+墙钟 15.26s
+=== 3) 768² 表格 05:28:53 ===
+图 = /home/caden/ornc/mmtests/big_table.png
+问 = 这张图是一个表格，请逐行说出每一格的字符。
+答原文 = '我来逐行识别这个表格中每一格的字符。\n\n**第一行：**\n- 第一格：A\n- 第二格：1\n- 第三格：7\n\n**第二行：**\n- 第一格：8\n- 第二格：2\n- 第三格：9\n\n**第三行：**\n- 第一格：c\n- 第二格：3\n- 第三格：0\n\n这些字符看起来像是数字和字母的混合，可能是某种编码或标识系统。'
+k200 = {"gen_secs": 27.94, "wall_secs": 29.29, "vision_tokens": [576], "image_encode": "[vis] 完成: 576 token, 总耗时 18.17s (gemm 9.78s, host 1.49s)", "tok_per_s": 3.8299, "prompt_chars": 7608, "nothink": true, "sid": "8943d229b19a1967", "prompt_tokens": 603, "prefill_reused_tokens": 0, "engine_prefill": "[orn] prompt=603 tok 用时 19.32s (32.0 ms/tok, 全量 复用0 tok) | 生成 107 tok 用时 8.60s = 12.442 tok/s | gemv 19628 次"}
+usage = {"prompt_tokens": 603, "completion_tokens": 107, "total_tokens": 710}
+墙钟 47.52s
+=== 4) 文本 6 条 05:29:41 ===
+########## Q1: 你好
+回复原文: 你好！有什么我可以帮你的吗？😊
+[9 tok, 1.3s, 6.728 tok/s, server_k200={'gen_secs': 1.33, 'wall_secs': 1.33, 'vision_tokens': [], 'image_encode': '[vis] 完成: 576 token, 总耗时 18.17s (gemm 9.78s, host 1.49s)', 'tok_per_s': 6.7467, 'prompt_chars': 71, 'nothink': True, 'sid': '440ee0853ad1e99f', 'prompt_tokens': 13, 'prefill_reused_tokens': 0, 'engine_prefill': '[orn] prompt=13 tok 用时 0.76s (58.4 ms/tok, 全量 复用0 tok) | 生成 9 tok 用时 0.55s = 16.219 tok/s | gemv 22466 次'}]
+########## Q2: 1+1等于几
+回复原文: 1+1 等于 **2**。
+[30 tok, 2.4s, 12.687 tok/s, server_k200={'gen_secs': 2.36, 'wall_secs': 2.36, 'vision_tokens': [], 'image_encode': '[vis] 完成: 576 token, 总耗时 18.17s (gemm 9.78s, host 1.49s)', 'tok_per_s': 12.6968, 'prompt_chars': 75, 'nothink': True, 'sid': '304ed16a6a7497e6', 'prompt_tokens': 17, 'prefill_reused_tokens': 0, 'engine_prefill': '[orn] prompt=17 tok 用时 0.54s (31.5 ms/tok, 全量 复用0 tok) | 生成 30 tok 用时 1.81s = 16.576 tok/s | gemv 26337 次'}]
+########## Q3: 用三句话解释什么是光合作用
+回复原文: 光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。
+[64 tok, 4.5s, 14.157 tok/s, server_k200={'gen_secs': 4.52, 'wall_secs': 4.52, 'vision_tokens': [], 'image_encode': '[vis] 完成: 576 token, 总耗时 18.17s (gemm 9.78s, host 1.49s)', 'tok_per_s': 14.1625, 'prompt_chars': 82, 'nothink': True, 'sid': '845b86d54c4cf7c0', 'prompt_tokens': 18, 'prefill_reused_tokens': 0, 'engine_prefill': '[orn] prompt=18 tok 用时 0.49s (27.2 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 4.01s = 15.960 tok/s | gemv 34465 次'}]
+########## Q4: 把“今天天气不错，我们出去走走吧”翻译成英文
+回复原文: The weather is nice today, let's go for a walk.
+[64 tok, 4.5s, 14.101 tok/s, server_k200={'gen_secs': 4.54, 'wall_secs': 4.54, 'vision_tokens': [], 'image_encode': '[vis] 完成: 576 token, 总耗时 18.17s (gemm 9.78s, host 1.49s)', 'tok_per_s': 14.1059, 'prompt_chars': 91, 'nothink': True, 'sid': '7f82f2c8ecc32aef', 'prompt_tokens': 25, 'prefill_reused_tokens': 0, 'engine_prefill': '[orn] prompt=25 tok 用时 0.63s (25.3 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.88s = 16.482 tok/s | gemv 42593 次'}]
+########## Q5: 写一个Python函数输入整数列表返回最大值索引(只给代码)
+回复原文: ```python
+[18 tok, 1.9s, 9.339 tok/s, server_k200={'gen_secs': 1.93, 'wall_secs': 1.93, 'vision_tokens': [], 'image_encode': '[vis] 完成: 576 token, 总耗时 18.17s (gemm 9.78s, host 1.49s)', 'tok_per_s': 9.3462, 'prompt_chars': 99, 'nothink': True, 'sid': '1ed5f492b9261ae7', 'prompt_tokens': 32, 'prefill_reused_tokens': 0, 'engine_prefill': '[orn] prompt=32 tok 用时 0.81s (25.3 ms/tok, 全量 复用0 tok) | 生成 18 tok 用时 1.10s = 16.427 tok/s | gemv 44916 次'}]
+########## Q6: 我明天要交一份季度税务报告，列5条检查清单
+回复原文: # 季度税务报告检查清单
+[64 tok, 4.7s, 13.754 tok/s, server_k200={'gen_secs': 4.65, 'wall_secs': 4.65, 'vision_tokens': [], 'image_encode': '[vis] 完成: 576 token, 总耗时 18.17s (gemm 9.78s, host 1.49s)', 'tok_per_s': 13.7594, 'prompt_chars': 90, 'nothink': True, 'sid': 'ae149d8602c97037', 'prompt_tokens': 26, 'prefill_reused_tokens': 0, 'engine_prefill': '[orn] prompt=26 tok 用时 0.70s (27.0 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.93s = 16.284 tok/s | gemv 53044 次'}]
+=== 5) 引擎日志里的编码耗时 ===
+[serve 05:18:05] 引擎| [orn] prompt=25 tok 用时 0.74s (29.7 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 4.14s = 15.442 tok/s | gemv 129182 次
+[serve 05:18:08] 引擎| [orn] prompt=32 tok 用时 0.88s (27.5 ms/tok, 全量 复用0 tok) | 生成 18 tok 用时 1.35s = 13.337 tok/s | gemv 131505 次
+[serve 05:18:13] 引擎| [orn] prompt=26 tok 用时 0.73s (28.0 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 4.14s = 15.457 tok/s | gemv 139633 次
+[serve 05:28:29] 图像编码合计 9.50s (1 张)
+[serve 05:28:38] 引擎| [orn] prompt=284 tok 用时 7.84s (27.6 ms/tok, 全量 复用0 tok) | 生成 20 tok 用时 1.37s = 14.639 tok/s | gemv 2585 次
+[serve 05:28:45] 图像编码合计 6.88s (1 张)
+[serve 05:28:53] 引擎| [orn] prompt=281 tok 用时 8.15s (29.0 ms/tok, 全量 复用0 tok) | 生成 3 tok 用时 0.20s = 15.034 tok/s | gemv 2977 次
+[serve 05:29:11] 图像编码合计 18.22s (1 张)
+[serve 05:29:13] 引擎| [orn] prompt=13 tok 用时 0.78s (60.4 ms/tok, 全量 复用0 tok) | 生成 9 tok 用时 0.54s = 16.529 tok/s | gemv 5815 次
+[serve 05:29:41] 引擎| [orn] prompt=603 tok 用时 19.32s (32.0 ms/tok, 全量 复用0 tok) | 生成 107 tok 用时 8.60s = 12.442 tok/s | gemv 19628 次
+[serve 05:29:42] 引擎| [orn] prompt=13 tok 用时 0.76s (58.4 ms/tok, 全量 复用0 tok) | 生成 9 tok 用时 0.55s = 16.219 tok/s | gemv 22466 次
+[serve 05:29:45] 引擎| [orn] prompt=17 tok 用时 0.54s (31.5 ms/tok, 全量 复用0 tok) | 生成 30 tok 用时 1.81s = 16.576 tok/s | gemv 26337 次
+[serve 05:29:49] 引擎| [orn] prompt=18 tok 用时 0.49s (27.2 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 4.01s = 15.960 tok/s | gemv 34465 次
+[serve 05:29:54] 引擎| [orn] prompt=25 tok 用时 0.63s (25.3 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.88s = 16.482 tok/s | gemv 42593 次
+[serve 05:29:56] 引擎| [orn] prompt=32 tok 用时 0.81s (25.3 ms/tok, 全量 复用0 tok) | 生成 18 tok 用时 1.10s = 16.427 tok/s | gemv 44916 次
+[serve 05:30:00] 引擎| [orn] prompt=26 tok 用时 0.70s (27.0 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.93s = 16.284 tok/s | gemv 53044 次
+=== 6) 卡状态 / 服务 ===
+异常累计 = 17
+reset_count dev0/1 = 4 / 4
+state dev0/1 = RUNNING / RUNNING
+health = {"status": "ok", "engine": "alive", "ready": true, "note": "", "model": "ornith-1.5-9b-k200", "requests": 10, "tok_total": 388, "gen_secs": 66.3, "tok_per_s": 5.853}
+=== stage19b done 2026-09-22 05:30:00 ===

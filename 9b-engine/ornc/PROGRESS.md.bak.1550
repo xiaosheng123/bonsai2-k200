@@ -1,0 +1,441 @@
+# PROGRESS —— 每完成一步追加一段（代理被重启后靠这个接力）
+格式: [时间] 做了什么 / 命令 / 结果 / 卡异常数 / 下一步
+
+[2026-09-21 13:0x] 环境建立: 看门狗已装并在跑(cron 自愈); TODO.md 已写; 卡两芯 RUNNING; kern.log 异常计数=14(历史, 无新增)
+   下一步: 用已验证正确的 orn 二进制包出 8090 服务, 跑黄金测试
+
+## 5. 2026-09-21 13:0x — 端到端跑通实录（本次会话）
+
+### 黄金测试 ✅ PASS
+```
+POST /v1/chat/completions  {"messages":[{"role":"user","content":"你好"}],"max_tokens":24}
+→ 卡上回复: 你好！有什么我可以帮你的吗？😊      (与 llama.cpp CPU 基准一字不差)
+耗时 71.4s = prompt 13 tok(42.18s, 0.31 tok/s) + 生成 9 tok(29.21s, 0.308 tok/s)
+```
+证据：`/home/caden/ornc/golden_raw.json`、`/home/caden/ornc/raw_tok.log`（逐 token hex）
+
+### 六条验收（经 8090, max_tokens=48, 驱动 /home/caden/ornc/accept6.py → accept.log）
+| # | 题 | 结果 | 耗时 |
+|---|---|---|---|
+| 1 | 你好 | ✅ `你好！有什么我可以帮你的吗？😊` | 71.4s |
+| 2 | 1+1等于几 | ✅ `1+1=2\n\n这是一个最基本的数学问题，答案是2。😊...` | 149.5s |
+| 3 | 用三句话解释什么是光合作用 | 进行中 | |
+| 4 | 中译英 | | |
+| 5 | 写 Python 函数 | | |
+| 6 | 季度税务报告 5 条清单 | | |
+
+### 卡上异常
+`grep -c "Exception in kernel execution" /var/log/kern.log` 全程 = **14**（历史累计，全部来自旧探针内核）
+⇒ **本次会话新增异常 = 0**。
+
+### 速度（如实，不优化）
+单次生成 0.126~0.308 tok/s（双芯）。每次请求都要重新 prefill 13 token（约 42s），当前引擎无 KV 复用。
+
+## 6. 最终结果（2026-09-21 13:30 收尾）
+
+### 六条验收全部经 8090 拿到通顺切题的卡上回复 ✅ 6/6
+| # | 题 | 卡上回复原文（节选/全文） | tok | 耗时 | tok/s |
+|---|---|---|---|---|---|
+| 1 | 你好 | `你好！有什么我可以帮你的吗？😊` | 9 | 71.4s | 0.126 |
+| 2 | 1+1等于几 | `1+1=2` + 「这是一个最基本的数学问题，答案是2。😊 如果你有其他数学问题…」 | 29 | 149.5s | 0.194 |
+| 3 | 用三句话解释什么是光合作用 | 「**光合作用**是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。**核心反应**：植物通过叶绿体中的叶绿素捕获…」 | 48(截断) | 282.7s | 0.227 |
+| 4 | 中译英 | 「**"The weather is nice today, let's go out for a walk."**」+ 其他表达方式 | 48(截断) | 234.0s | 0.205 |
+| 5 | 写 Python 函数(只给代码) | ```python\ndef max_index(nums):\n    return nums.index(max(nums))\n``` + 空列表兜底建议 | 48(截断) | 256.7s | 0.187 |
+| 6 | 季度税务报告 5 条清单 | 「# 季度税务报告检查清单 … ## 1. 收入数据核对 - 确认所有季度收入已正确记录 - 核对银行流水与账面…」 | 48(截断) | 237.3s | 0.202 |
+
+- 驱动：`/home/caden/ornc/accept6.py`，日志 `/home/caden/ornc/accept.log`；`=== 完成: 6/6 条拿到非空回复 2026-09-21 13:30:06 ===`
+- 3/5/6 条被 max_tokens=48 截断（题目要求的信息都在开头就给全了，通顺、切题）
+- 服务累计：9 请求 / 257 token / 1374.3s ⇒ 0.187 tok/s（**双芯**，无任何性能优化）
+
+### 卡上异常：本次会话新增 = 0
+- `grep -c "Exception in kernel execution" /var/log/kern.log`：开始 14 → 结束 **14**（全部是历史旧探针内核留下的）
+- `grep -c "session error"`：14（同批事件），无新增
+- 两芯 `/proc/xpu/dev0|1/state` 全程 **RUNNING**；**本次会话一次 soft_reset 都没做**
+
+### 开机自拉起（已装并实测）
+- crontab：`@reboot /bin/bash /home/caden/ornc/autostart.sh`（保留了原有的 wd_guard 行）
+- 实测：`autostart.sh` 认出「两芯 RUNNING」+「8090 已有健康服务」⇒ **不动它**，rc=0（日志 autostart.log）
+
+## 7. 还没做的（如实）
+- **速度优化全部暂缓**（用户明确要求）。有效读带宽（由真实耗时反推）≈ `9.2GB ÷ 3.25s/token ≈ 2.8 GB/s`，
+  与卡的有效读带宽（用户更正值 133~140 GB/s）差 ~50 倍 ⇒ 纯代码问题，余量巨大。
+  **"读带宽到底是 70 还是 140 GB/s" 这次没有实测**（按用户要求没做任何带宽测量工作）。
+- 每次请求都重新 prefill 13 token（约 42s），**没有 KV 复用**。
+- 干净重写（`wload.cpp` / `kern.xpu` / `fwd.cpp`）尚未开始，`/home/caden/ornc/` 目前是
+  DESIGN.md + PROGRESS.md + serve.py + start/recycle/autostart + accept6.py（服务层已就位，算子层还是复用旧引擎）。
+- 已知隐患：`/home/caden/orn_engine/watchdog.py`（由 wd_guard.sh 每分钟保活）用 `pgrep -f` 按
+  "orn/kq8/mbench/probe/…" 名字杀进程，模式较宽 —— 真出异常时它会连带杀掉 cmdline 里含这些字样的
+  无关进程（包括我们的 shell）。它是"兜底"，不是精密工具；safe_run.sh 才是每次运行的精准安全网。
+
+## 8. 2026-09-21 14:0x — 本轮提速实录 (v2 引擎 orn3 + serve2.py; 全部改动只在主机侧, 设备内核 kq8 一行没改)
+
+### ★ 卡上异常次数 (硬约束)
+- 本轮开始 = 14 (全部历史: probe_new/m_lm16/m_lm32/probe4/mbench/mb3, 最后一条 11:33:10)
+- **本轮新增 = 1** ⇒ 现在 `grep -c "Exception in kernel execution" /var/log/kern.log` = **15**
+  - 那 1 条: `kunlun: [INFO] xpu0 sess122 ri: session error Exception in kernel execution` (13:41:00)
+  - 根因不是"越界野指针", 而是我写的一个只读带宽探针把 `__local__ unsigned char buf[32768]` 开大了:
+    固件把它记为 `WR_OVER_LM` (写超局部存储)。**从 /proc/xpu/dev0/errtask 拿到了完整现场**:
+    `cl-0..3 token=43788 reason=0x40 / ..reason[6]: WR_OVER_LM / .name=_Z5rd2_kPKhxxiiPi .ncl=4 .nco=16`
+    ⇒ 结论: **K200 每核局部存储 (LM) < 32KB**; 想上大块搬运必须先测准 LM 上限。
+  - 处置: `soft_reset 0` 一次即恢复, 两芯回到 RUNNING, 没有反复异常, 宿主无异常重启 (异常数只 +1, 未扩散)
+- 13:41 之后到现在(14:1x) 共跑了 20+ 次 safe_run 设备作业 (带宽/扩展性/装载/生成/验收) **全部 0 异常**,
+  每次都过 safe_run.sh 的权威口径 (kern.log 字节偏移增量 = 0), 两芯全程 RUNNING。
+
+### ★ 实测带宽 (任务书第 1 步: "70 还是 133 GB/s" 已钉死)
+| 通路 | 工具/方法 | 结果 |
+|---|---|---|
+| 主机↔卡 PCIe (厂商) | `xre-driver/.../tools/test_dma --loop 2 0 268435456` | H2D **3.51 GB/s**, D2H **3.73 GB/s** (user-time 口径) |
+| 板内拷贝 (纯 memcpy, 零内核风险) | `xpu_memcpy(..., XPU_DEVICE_TO_DEVICE)` 1/16/64/256/512MB | 1.00 / 19.5 / 53.6 / 66.5 / **70.2 GB/s**(512MB 渐近) |
+| **GEMV 真的走的那条路 (GM2LM)** | 已验证的 V2 内核, 双芯并发 | 单芯 **2.71 GB/s**, 双芯 **5.38 GB/s** (1.99x) |
+- `xpu_device_get_attr` 实测拓扑: **XPUATTR_NUM_CLUSTER=4**, NUM_DMACH=3, MEM_MAIN_CAPACITY=8.46 GB/芯, L3=16MB。
+- cl 扩展性 (V2 内核, M=16384): cl=1 **0.68** / cl=2 1.36 / cl=4 2.71 / cl=8 2.70 / cl=16 2.69 GB/s
+  ⇒ **每簇硬上限 0.68 GB/s (4352B 一次搬运要 6.4µs), 4 个物理簇跑满后加簇无用**。
+- 搬运粒度敏感度: 非V2(1088B/行, 每行 4 次 DMA)=0.88 GB/s vs V2(4352B/行, 每行 1 次)=2.69 GB/s
+  ⇒ **耗时 ≈ 搬运次数, 不是字节数** (4x 次数 → 3.05x 时间) ⇒ 瓶颈是每次 GM2LM 的固定开销。
+- 每次 CLUSTER launch 的**主机固定开销 = 3.30 ms** (与 cl/co 无关; `<<<1,1>>>` 只要 0.012ms)。
+- **Q8 的 tok/s 上限定死** (权重 9.2 GB/token):
+  * 用现有 GM2LM 粒度 + 两芯 100% 忙: 9.2/5.38 = 1.71 s/token = **0.58 tok/s**
+  * 若搬运能做到官方 fc<f16> 参考的 13.7 GB/s/芯 (27.4 双芯): 0.34 s/token = **2.98 tok/s**
+  * 若 GM2LM 能跑到板内拷贝上限 (35 GB/s 单读/芯, 70 双芯): 0.13 s/token = **7.6 tok/s**
+  ⇒ 任务书里"卡纯拷贝 133~140 GB/s"在本机实测**不成立**(板内拷贝 70 GB/s, 单向读约 35 GB/s);
+  当前内核离**板内拷贝**上限差 ~13 倍, 差距 100% 在 GM2LM 的搬运粒度上, 不是算力。
+
+### ★ 做了什么改动 (新文件: `orn_engine/orn2.cpp` → `orn2`; `orn3.cpp` → `orn3`; `ornc/serve2.py`; `ornc/start2.sh`)
+1. **双芯行分裂**: 每个 Q8_0 矩阵的行按 `[0,Mh) → chip0, [Mh,M) → chip1` 切两半, 在两个设备上各发一次
+   CLUSTER launch (不同设备默认 stream 真并发, 实测 1.99x)。小于 10MB 的矩阵不拆(拆了多付 3.3ms launch 不划算)。
+   `K200_NOSPLIT=1` 可一键退回单片, 用于 A/B。行切分是字节干净的(V2 行步长均匀), 不需要改内核。
+2. **同 x 矩阵拼接**: 读同一个输入向量的矩阵按行拼成一个大矩阵, 一次 launch 出全部结果:
+   recr 层 `{attn_qkv+attn_gate}`、`{ffn_gate+ffn_up}`; attn 层 `{q+k+v}`、`{ffn_gate+ffn_up}`;
+   `ssm_out`/`attn_output`/`ffn_down` 各自单独。**每 token 的 launch 数 201 → 129**, 把分裂带来的
+   额外 launch 开销抵掉。段布局在装载时 assert, 对不上直接 FATAL 退出。
+3. **KV/状态复用** (`orn3` + `serve2.py`):
+   (a) **prompt 级快照**: 快照 conv(3.1MB) + delta-net S(67MB) + 8 个注意层的 Kc/Vc(67MB) + logits,
+       同一 prompt 再问一次 ⇒ 直接恢复, **prefill 0.00s**;
+   (b) **同会话续算**: 会话 id = sha1(首条 user 消息)(serve 侧), 引擎按 session 记住"已吃进状态的 token 序列 + pos",
+       新 prompt 正好是它的前缀延伸时只 prefill 新增部分。
+   ★ 顺带修了一个坑: `serve.py` 以前给**历史里的 assistant 回合**不发强制空 `<think></think>` 块, 导致
+     历史文本的 token 流和上一轮"已吃进状态"的 token 流在第 10 个 token 就错位, 续算永远不命中。已修。
+4. 其它: `recycle2.sh` (按 /proc/<pid>/fd 实测持卡者, 收干净 serve2/orn3/安全网包装);
+   `watchdog.py` 重写为白名单口径 (`--dry` 可自检)。
+
+### ★ 性能 (真实, warmup 后; 全程 safe_run 保护)
+| 指标 | 旧基线 | v2 (orn3) | 提升 |
+|---|---|---|---|
+| 生成速度 | 0.308 tok/s (9 tok/29.21s) | **0.642~0.645 tok/s** | **2.09x** |
+| prefill 13 token | 42.18s | **23.09s** | 1.83x |
+| 端到端 "你好" (9 tok) | 71.4s = 0.126 tok/s | **16.0s = 0.562 tok/s** | **4.5x** |
+| 每 token launch 数 | 201 | 129 | -36% |
+| 权重装载 | ~20s | 18.7s, 7.85 GiB (chip0=chip1=4017MB) | — |
+| 正确性 | 你好 ⇒ `你好！有什么我可以帮你的吗？😊` | **一字不差** | 无回归 |
+
+### ★ KV 复用实测 (同一台 8090)
+- 同一个 prompt 连问两次: 第 1 次 wall 35.7s (prefill 23.11s) → 第 2 次 wall **12.5s (prefill 0.00s, "快照 复用13 tok")** ⇒ **2.9x**
+- 同会话第 2 轮(带历史): prefill 63.95s → **35.54s (会话 复用20 tok)**, wall 76.5s → **44.5s** ⇒ 1.72x
+- 验收 Q1 复用了刚才 kv_demo 的快照 ⇒ 16.0s 就出完整 9 token (0.562 tok/s)
+
+### ★ 还差什么 / 下一步 (要动设备内核, 必须开维护窗口)
+- 现有 GM2LM 是 **4352B 一次**, 每次固定 ~4.4µs/簇 ⇒ 0.68 GB/s/簇。把一次搬运放大到 16~32KB
+  (每行挤 3~7 行的连续行, 或改用 `GM2SM` 让整簇 16 核共享一块大 tile) 是**唯一**能把 0.58 → 2~3 tok/s 的路。
+- 卡点: 每核 LM < 32KB **且未知具体值**(实测 32768 触发 `WR_OVER_LM`, 8712 字节可用)。必须先做一次
+  "LM 容量二分" 探针; 每次猜错 = kern.log +1 条异常(可检测、可 soft_reset、不扩散), 所以留给维护窗口做。
+- 另外两条已验证但没用的线索: (a) `xpu_launch_async` 用双线程分设备发射能省掉一半 3.3ms×N 的主机 launch 开销
+  (但要赌 libxpurt 线程安全, 风险高); (b) 主机数学(conv1d/delta-net/norm/softmax)实测只占毫秒级, 搬上卡对速度无益,
+  只对"整层合成 1 次 launch"有意义。
+
+## 9. 2026-09-21 14:30~15:0x — 第二轮: LM 容量真值 + 路线 A 的实测裁决 (用户要求"一次只探一个值"的规矩已遵守)
+
+### 9.1 ★ LM (每核局部存储) 容量 —— 二分探测, 一次一个值, 每次都过安全网 + 宿主存活检查
+| 探测值 (字节/核, <<<1,16>>> 单簇 16 核) | 结果 | kern.log 异常增量 | 宿主 192.168.66.26 |
+|---|---|---|---|
+| 9088 (现有 V2 内核实测在用) | ✓ | 0 | — |
+| 12288 | ✓ 跑通 | **0** | ping 通 ✓ |
+| **14336** | **✓ 跑通** | **0** | ping 通 ✓ |
+| 16384 | ✗ WR_OVER_LM | **+1** | ping 通 ✓ (VM 未失联) |
+| 32768 (上一轮误撞) | ✗ WR_OVER_LM | +1 (已计入上节) | ping 通 ✓ |
+⇒ **裁决: 每核 LM ∈ (14336, 16384) 字节; 生产内核实际可用上限 ≈ 14 KB/核 (16 核/簇 ⇒ 簇内合计 ≈ 229 KB)**
+- 探测脚本 `orn_engine/lmp/probe_lm.sh` (编译该变体 → 记录 kern.log 字节偏移 → safe_run → 立刻比对异常增量 → ping 宿主 → 必要时 soft_reset 并复核 state), 历史落 `orn_engine/lmprobe_history.log`
+- 两次失败都当场被安全网拦下、只有 1 条异常、soft_reset 0 一次即回 RUNNING, **宿主全程存活(未重启)**; 12288/14336 两次探测 **0 异常**
+
+### 9.2 ★★ 路线 A (放大搬运粒度) 的实测裁决: **此路不通 —— GM2LM 是硬速率上限, 不是固定开销**
+1. **写了一个真的"多行批量搬运"内核** `orn_engine/kq8r.xpu` (RB 行一次 GM2LM; RB=2 ⇒ 一次搬 8704 连续字节, LM 需求 13320B/核 < 14336 ✓ 合法)
+   用同一份二进制做 A/B (K200_RB=1 vs 2), 同一张量 `blk.0.ffn_gate.weight` (M=12288, N=4096), 16 组 grid 全扫:
+   | 内核 | 每行搬运 | 最好 GB/s | 精度 |
+   |---|---|---|---|
+   | 老 V2 (逐行 4352B) | 4352 B | **2.51** | 全M relrms=0.3692% |
+   | 新 RB=2 (一次 8704B) | 8704 B | **2.49** | 全M relrms=0.3692% (y[0]/y[1] 逐位相同) |
+   ⇒ **搬运量翻倍, 带宽一点没变** ⇒ "每次搬运交 4.4µs 固定开销"的假设被证伪, 4352B→8704B 的耗时是线性(2 倍)的。
+2. **换内存种类也没用**: 同一 V2 内核, 权重放主存 vs 放**片上 L3 (16MB, XPU_MEM_L3)**: 2.52 vs **2.54** GB/s ⇒ 与源无关。
+3. **真正的规律** (全部实测): 每核 GM2LM ≈ 43 MB/s ⇒ 64 核/芯 (4 簇 × 16 核, XPUATTR_NUM_CLUSTER=4) 合计 **2.71 GB/s/芯**;
+   cl=1/2/4 ⇒ 0.68/1.36/2.71 GB/s 线性、cl≥4 到顶 (物理簇跑满); 1088B/次时每簇 0.22 GB/s (更小更差)。
+   ⇒ **每次搬运不管 4KB 还是 9KB, 单核就是 ~43 MB/s 的字节速率 —— 这是 GM2LM 原语的硬件上限** (只有 HBM 峰值 140 GB/s 的 2%)。
+4. **原语清单核对了**: `xpu/kernel/*.h` 里 global→核 的搬运动词**只有 `gm2lm` / `gm2sm`** (全都是 memory-kind 拷贝指令),
+   没有更宽的向量 global 载入、没有 int8 点积内建 (`simd.h` 只有 LM 上逐元素 vv/sv 浮点运算) ⇒ **没有第三条读数据的路可用**。
+   (板内拷贝 70 GB/s 是**主机侧 xpu_memcpy D2D** 走的 DMA 引擎, 设备代码拿不到。)
+⇒ 结论: **0.64 tok/s 的生成速度已经吃满了 GM2LM 这条路** (双芯实测 5.38 GB/s vs 理论 2×2.71=5.42, 已达 99%)。
+   要上 5~15 tok/s 必须换**读数据机制**, 不是优化现有内核。说明书/属性里唯一剩下的高速通道是 **SD-CDNN 引擎**
+   (XPUATTR_NUM_SDNN=4/芯, 官方 `xpu_create_sd_func` 明说"仅高级开发者"), 官方 fc<f16> 13.7 GB/s 参考值应当是它跑出来的 —— 那是一个独立项目, 不是本轮能安全落地的改动。
+
+### 9.3 ★ 聚合吞吐 (2 请求并发) 实测: **并发一分钱都不多**
+| 方式 | 请求A | 请求B | 总 wall | 聚合 |
+|---|---|---|---|---|
+| 串行 2 请求 (各 8 tok) | 35.7s | 42.7s | 78.4s | **0.204 tok/s** |
+| 并发 2 请求 (各 8 tok) | 35.6s | 78.2s (排队) | 78.2s | **0.204 tok/s** |
+- 原因有两层: (a) serve2.py 用一把锁串行化请求 (b) 更根本: 单 token 必须读完全部权重, 而两芯合计只有 5.4 GB/s ⇒ 带宽已满, 并发只会互相排队。
+- 我这一版的**双芯真并行**已经落实: 每个矩阵的行 [0,Mh)→chip0, [Mh,M)→chip1 同时发射, 实测 1.99x
+  (注: 任务书里说的 "layer->chip 1,1,1,1,1,0,1,0 交替 ⇒ 同一 token 内跨芯串行" 是**旧 orn 基线**, 本版已改成行分裂并行)
+
+### 9.4 本轮卡异常台账 (如实)
+- 本轮开始 14 → 现在 **16**: 新增 2 条
+  1. 13:41 `xpu0 sess122 ri` —— 我的只读带宽探针 `__local__ buf[32768]` 超 LM (**不是**野指针), 安全网当场判 FAIL, soft_reset 0 恢复
+  2. 14:30 `lmprobe_16384` —— LM 容量二分探测的**预期失败值** (WR_OVER_LM), 单条、不扩散、soft_reset 0 恢复
+- 其余全部设备作业 (含 12288/14336 两次探测、RB=2 A/B、L3 对照、4 次模型装载、6 条 192-token 验收、2 请求聚合) **0 新增**
+- 宿主 192.168.66.26 每次探测后 ping 通 ✓, 全程未重启; 两芯探测后均 RUNNING
+
+### 9.5 6 条验收 (max_tokens=192, 经 8090, 提速版 orn3 + serve2.py, 14:06:04 → 14:28:03)
+| # | 题 | tok | 总耗时 | 端到端 tok/s | 生成 tok/s | prefill |
+|---|---|---|---|---|---|---|
+| 1 | 你好 | 9 | 16.0s | 0.562 | 0.563 | 0.00s (快照复用 13 tok) |
+| 2 | 1+1等于几 | 29 | 81.8s | 0.355 | 0.562 | 30.13s |
+| 3 | 用三句话解释什么是光合作用 | 88 | 188.6s | 0.466 | 0.562 | 31.95s |
+| 4 | 中译英 | 169 | 385.1s | 0.439 | 0.560 | 44.38s |
+| 5 | 写 Python 函数 | 114 | 260.1s | 0.438 | 0.561 | 56.72s |
+| 6 | 季度税务报告 5 条清单 | 192 | 387.4s | 0.496 | 0.563 | 46.22s |
+- 全部 6/6 拿到切题、通顺、非空回复; 全文与逐条耗时落 `ornc/accept192.log`
+- 对照旧基线: 生成 0.308→0.562 tok/s (**1.83x**); 端到端同题 (你好 9 tok) 71.4s→16.0s (**4.5x**, 快照复用贡献)
+
+### 9.6 服务/自拉起/收尾状态
+- 8090: `serve2.py` + `orn3` (双芯行分裂 + 同 x 拼接 + KV/状态复用), 引擎在 safe_run 安全网内, /health = ok/ready ✓
+- 自拉起: crontab `@reboot autostart.sh` 已改成一键起 v2 (`start2.sh`), v2 缺失自动退回老版; 另有 `*/1 wd_guard.sh` 保活
+- `watchdog.py` 已重写为白名单口径 (只杀 /home/caden/ 下 `orn|orn2|orn3|...` 且排除自己/safe_run/recycle),
+  `--dry` 实测: 命中杀 1 个 (真引擎), 而旧版 `pgrep -f "orn"` 会命中 7 个 (含 serve、safe_run、验收脚本、我自己的 shell)
+- `recycle2.sh` 修好前一版漏匹配 serve2.py/orn3 的问题, 按 /proc/<pid>/fd 实测持卡者, 清得干净 (重复 safe_run 包装 = 0)
+
+## 10. 2026-09-21 15:1x — 本轮: 厂商带宽真值 + 服务脚本命名统一 + 会话级 KV 复用核验 + 6 条 192 验收
+
+### ★ 规程 (用户本轮新增指令, 立即生效)
+> **【铁律-新】任何改动(改脚本/改服务/测带宽/调参)之前, 先 `stop.sh` 把 8090 + 引擎停掉, 卡保持空闲;
+> 全部改完、确认无误后, 最后一步才 `start.sh` 拉起做验收。带宽类测量必须卡独占, 数字才准。
+> 验收完保留服务运行。若拉起服务后出现卡异常, 立即停服务并报告。**
+
+### ★ 卡异常次数 (硬约束: 必须仍为 16)
+| 口径 | 本轮开始 | 本轮结束 | 新增 |
+|---|---|---|---|
+| `grep -ac "Exception in kernel execution" /var/log/kern.log` | 16 | **16** | **0** |
+| distinct `exception token=` 值个数 | 16 | **16** | **0** |
+- 本轮**一次 soft_reset 都没做**; 两芯全程 `/proc/xpu/devN/state` = RUNNING/RUNNING;
+- 宿主 NAS 192.168.66.26 ping 0% loss (0.37~0.71ms), 未重启;
+- 本轮所有设备作业 (厂商 DMA 5 次 + D2D 1 次 + 服务 3 次起停 + 8 个请求) 全部经 safe_run.sh 复核, kern.log 增量全为 0。
+
+### 10.1 ★ 厂商工具实测带宽 —— "70 还是 133 GB/s" 钉死 (原文照抄)
+**A) 主机↔卡 PCIe —— 厂商工具 `test_dma` (卡独占, safe_run -n vendor_test_dma, kern.log 增量=0)**
+```
+$ ./test_dma --loop 3 0 268435456          # dev0, 256MB, loop 3
+HOST_TO_DEVICE
+  AverageUserTime(us): 71046.000000
+  AverageUserSpeed(GB/s): 3.518847
+  AveragePCIeTime(us): 152965.921875
+  AveragePCIeSpeed(GB/s): 1.634351
+DEVICE_TO_HOST
+  AverageUserTime(us): 66911.664062
+  AverageUserSpeed(GB/s): 3.736269
+  AveragePCIeTime(us): 148063.234375
+  AveragePCIeSpeed(GB/s): 1.688468
+(error_count=0)
+```
+```
+$ ./test_dma --loop 3 0 1073741824         # dev0, 1GB, loop 3
+HOST_TO_DEVICE  AverageUserSpeed(GB/s): 3.501016   (PCIe 口径 1.632757)
+DEVICE_TO_HOST  AverageUserSpeed(GB/s): 3.748524   (PCIe 口径 1.688066)
+(error_count=0)
+```
+```
+$ ./test_dma --loop 3 1 268435456          # dev1, 256MB, loop 3
+HOST_TO_DEVICE  AverageUserSpeed(GB/s): 3.486135   (PCIe 口径 1.632779)
+DEVICE_TO_HOST  AverageUserSpeed(GB/s): 3.733442   (PCIe 口径 1.687399)
+```
+⇒ **H2D ≈ 3.49~3.53 GB/s, D2H ≈ 3.73~3.75 GB/s** (user-time); 厂商 PCIe-time 口径 ≈1.63/1.69 GB/s。
+  两芯一样; 256MB→1GB 基本不变 ⇒ 已到 PCIe 稳态。`test_dma --l3` 本机 **rc=1 不支持** (无输出)。
+
+**B) 设备内 D2D —— 厂商 peer 工具不可用, 用纯 `xpu_memcpy` 厂商 API 实测 (hb/d2d, 零内核风险, 非新内核)**
+```
+[d2d] 设备内 D2D 拷贝 (XPU_DEVICE_TO_DEVICE)
+  D2D    1 MB      1.095 ms  拷贝带宽=   0.96 GB/s  (单读口径=   0.48 GB/s)
+  D2D   16 MB      1.100 ms  拷贝带宽=  15.26 GB/s  (单读口径=   7.63 GB/s)
+  D2D   64 MB      1.094 ms  拷贝带宽=  61.36 GB/s  (单读口径=  30.68 GB/s)
+  D2D  256 MB      4.310 ms  拷贝带宽=  62.28 GB/s  (单读口径=  31.14 GB/s)
+  D2D  512 MB      8.094 ms  拷贝带宽=  66.33 GB/s  (单读口径=  33.16 GB/s)
+[d2d] peer 256MB rc=-807 wait=0 FAIL
+=== d2d done ===
+```
+**C) 跨芯 peer 拷贝 —— 厂商工具明确 FAIL, 本机(vfio 直通 VM)不支持**
+```
+$ ./kunlun2/test_memcpy_peer --perf --loop 3 0 1 268435456
+xpu_memcpy_peer(1, 0x608000000, 0, 0x208000000, 268435456)
+→ rc=1, 无任何性能输出
+$ ./kunlun2/test_memcpy_peer --unit 0 1 268435456     → 同样 rc=1 (正确性也跑不了)
+$ ./kunlun2/test_memcpy_peer --auto                    → rc=1, 0.11s 直接退出
+(hb/d2d 里等价调用 xpu_memcpy_peer 返回 rc=-807)
+```
+⇒ **裁决: 设备内 D2D 拷贝带宽 = 62~66 GB/s (512MB 渐近 66.3), 单向读 = 31~33 GB/s。**
+  **"133~140 GB/s" 在本机实测不成立; "70 GB/s" 只是拷贝口径的近似值 (实测 66.3, 差 5%), 不是单向读。**
+  跨芯 peer（0→1）在本 VM 上 rc=-807 不支持 ⇒ 两芯之间只能各自算各自的, 不能互相搬运。
+
+### 10.2 ★ 服务脚本命名统一 (修"停不掉、带病引擎留卡上")
+**问题**: 上一轮 start 起的是 `serve2.py` + `orn3`, 而目录里**根本没有 stop 脚本**(只有 recycle2.sh 且名字/模式对不上), 
+一旦要停就只能手搓 pkill, 极易漏杀把带病引擎留在卡上。
+
+**改动 (全部主机侧, 未碰设备内核)**
+| 文件 | 动作 |
+|---|---|
+| `ornc/start.sh` | **重写为唯一启动入口**: 固定 v2(orn3+serve2.py), 起前自检"已有健康服务→不起"、"有残留→先停"、"两芯非 RUNNING→拒绝"; 就绪等待 120s |
+| `ornc/stop.sh` | **新建 (唯一停止入口)**: 按 start.sh 同一套名字杀 `serve[0-9]*.py` / `safe_run.sh -n orn*` / `orn_engine/orn[0-9]*`, 最后按 `/proc/<pid>/fd` **实测谁真的开着 /dev/xpu\*** 兜底 `kill -9`; 只杀进程, **绝不 soft_reset** |
+| `ornc/restart.sh` | **新建**: stop.sh + start.sh 唯一组合入口 |
+| `ornc/status.sh` | **新建**: 只读一览 (8090 / 进程 / 持卡者 / 两芯 state / 异常计数 / watchdog) |
+| `ornc/start2.sh` | 改为**兼容壳**(`exec start.sh`), 不再各写一套 |
+| `ornc/recycle2.sh` | 改为**兼容壳**(`exec stop.sh`) |
+| `ornc/autostart.sh` | 改为一律调 `start.sh`, 不再自己拼 orn3/serve2.py 或退回老版 |
+| `ornc/serve2.py` | (a) 文件头写明命名约定; (b) `usage.prompt_tokens` 不再硬写 13, 改报**引擎实测值**; (c) 新增 `k200.prompt_tokens` / `k200.prefill_reused_tokens` 便于观测复用 |
+- 备份: `start.sh/start2.sh/recycle2.sh/autostart.sh/serve2.py` 均有 `.bak.20260921_224429` / `.bak.20260921_144726`; 
+- 实测: `restart.sh` 一次通过 —— stop.sh 报"已 TERM serve / safe_run", 复核"server: 无 / engine: 无 / 8090: 未监听", 两芯 RUNNING; 随后 start.sh **READY after 20s**。
+
+### 10.3 ★ 会话级 KV/状态复用 (机制本来就在, 本轮实测核验 + 接口可见性)
+- **机制** (主机侧, 与设备内核无关, 引擎 `orn3.cpp:1021~1162`):
+  (a) **prompt 级快照** `g_snap`: 同一 prompt 再来 ⇒ 直接恢复 conv+S+Kc/Vc+logits, **prefill 0.00s**;
+  (b) **会话级续算** `g_sess[sid]`: `serve2.py` 用 `sid = sha1(首条 user 消息)[:16]` 传下去, 引擎要求
+      `g_live_sid==sid && g_live_pos==S.pos` 且新 prompt 的前缀 token 序列与已吃进的完全一致, 才只 prefill 增量。
+- **本轮实测 (重启后冷状态, 引擎行原文)**
+```
+=== 1) 第一次 (全量 prefill) ===
+[req1] wall=35.70s sid=440ee0853ad1e99f
+     [orn] prompt=13 tok 用时 23.12s (全量 复用0 tok) | 生成 8 tok 用时 12.46s = 0.642 tok/s
+=== 2) 同一 prompt 再来一次 ===
+[req2] wall=12.48s sid=440ee0853ad1e99f
+     [orn] prompt=13 tok 用时  0.00s (快照 复用13 tok) | 生成 8 tok 用时 12.44s = 0.643 tok/s   ← prefill 消掉
+=== 3) 同会话续聊 (prompt 41 tok) ===
+[req3] wall=49.80s
+     [orn] prompt=41 tok 用时 37.31s (会话 复用20 tok) | 生成 8 tok 用时 12.48s = 0.641 tok/s   ← 只算 21 个新 token
+=== kv_demo2 同会话多轮 (turn2 的 assistant 历史 = turn1 真实生成原文) ===
+[turn1] wall=12.46s  [orn] prompt=13 tok 用时 0.00s (快照 复用13 tok) | 生成 8 tok ... = 0.644 tok/s
+[turn2] wall=44.47s  [orn] prompt=40 tok 用时 35.56s (会话 复用20 tok) | 生成 5 tok ... = 0.561 tok/s
+```
+- **首请求 vs 次请求 (同 prompt)**: wall **35.70s → 12.48s = 2.86x**, prefill **23.12s → 0.00s**;
+  同会话第 2 轮: prefill 从"全量 40 tok≈71s"降到 **35.56s (只算 20 个新 token)**, wall 44.5s。
+- 注意: **6 条验收题是 6 个不同会话(sid 不同), 因此各付一次冷 prefill**, 复用收益只体现在"重复问/多轮追问"上。
+- 旧基线"每请求重复 prefill 13 token ≈ 42s"在本版已变成 **23.1s (全量) / 0.00s (快照命中)**。
+
+### 10.4 ★ 6 条验收 (max_tokens=192, 经 8090, 服务重启后冷状态起跑; 14:51:18 → 15:14:19)
+| # | 题 | 回复是否直接切题 | tok | 总耗时 | 端到端 tok/s | 生成 tok/s | cold prefill |
+|---|---|---|---|---|---|---|---|
+| 1 | 你好 | ✅ `你好！有什么我可以帮你的吗？😊` | 9 | 39.2s | 0.229 | 0.562 | 23.09s |
+| 2 | 1+1等于几 | ✅ `1+1=2` + 「最基本的数学问题，答案是2。😊…」 | 29 | 81.8s | 0.354 | 0.562 | 30.17s |
+| 3 | 用三句话解释什么是光合作用 | ✅ 三句：定义/核心反应/重要意义 | 88 | 227.8s | 0.386 | 0.561 | 31.98s |
+| 4 | 中译英 | ✅ `"The weather is nice today, let's go out for a walk."` + 其他表达 | 169 | 346.1s | 0.488 | 0.560 | 44.45s |
+| 5 | 写 Python 函数(只给代码) | ✅ 代码块 `def max_index(nums): return nums.index(max(nums))` + 空列表兜底 | 114 | 260.2s | 0.438 | 0.561 | 56.84s |
+| 6 | 季度税务报告 5 条清单 | ✅ 「季度税务报告检查清单」5 条(收入/费用/税额/期限/附件) | 192(截满) | 426.3s | 0.450 | 0.563 | 46.14s |
+- **6/6 全部拿到直接给答案、通顺、切题的卡上回复**; 全文落 `ornc/accept192.log`。
+- **真实生成速度 = 0.560~0.563 tok/s (双芯, 稳定)**; 端到端 0.229~0.488 (被冷 prefill 拉低)。
+- 服务累计: 8 请求 / 619 token / 1381.4s ⇒ **0.448 tok/s** (`/health`)。
+- ⚠ **如实标注一个未定位现象**: Q3 与 Q6 的"墙钟"比引擎自报(prefill+gen)各多出 **39.1s**(两题几乎完全相同 39.12/39.18), 其余 4 题差 ≤0.12s。该 39s 落在引擎两个计时器**之外**(tokenize 或 take_snap 之间), 不在卡上: 期间 kern.log 增量 0、两芯 RUNNING、无内存压力(swap 仅 1MB、无 si/so)、引擎 RSS 仅 388MB。**未定位, 不猜原因**, 记入第 7 节遗留项。
+
+### 10.5 本轮收尾状态
+- 8090: `serve2.py` + `orn3` (引擎在 safe_run 安全网内), `/health` = ok/ready ✓, **按用户要求保持运行**;
+- 唯一入口: `start.sh` / `stop.sh` / `restart.sh` / `status.sh` (命名已统一, start2.sh / recycle2.sh 退化为兼容壳);
+- autostart.sh 已改为调 `start.sh`; crontab 仍是 `@reboot autostart.sh` + `*/1 wd_guard.sh` 保活;
+- 卡异常 = **16 → 16 (新增 0)**; 两芯 RUNNING; 宿主 NAS 存活。
+
+## 11. 2026-09-21 15:2x — 本轮: 官方算子 vs 自写 GM2LM 内核 的对比实验（按用户中途更正的任务书执行）
+
+### ★ 本轮卡异常台账 —— 起 16 → **终 17（新增 1）**，不达标，如实报告
+| 口径 | 本轮开始 | 本轮结束 | 新增 |
+|---|---|---|---|
+| `grep -ac "Exception in kernel execution" /var/log/kern.log` | 16 | **17** | **+1** |
+| distinct `exception token=` 值个数 | 16 | 17 | +1 |
+- 唯一新增的一条（原文照抄）:
+```
+Sep 21 15:24:39 caden kernel: [ 9442.312089] kunlun: [INFO] xpu0 sess209 fccmp: session error Exception in kernel execution
+```
+- **根因（从 `/proc/xpu/dev0/errtask` 拿到完整现场，不是猜）**:
+```
+sdcl-0 token=314295 reason=0x8000000 / sdcl-1 / sdcl-2 / sdcl-3  (四条: SD-CDNN 引擎 4 个 SD 核)
+..reason[27]: RBRESP
+ETASK tk=314295 .name=_Z10fc_int8_v2IfafEviiiiifPKT_PKT0_fPTT1_PKfiS9_S9_S9_Pfiii .ncl=4 .nco=8 .ksz=0x19c0
+```
+  ⇒ 触发点是 **官方 `gemm_int8_maxptr<float, signed char, float>` 内部派发到 SD-CDNN 引擎的 `fc_int8_v2<float,signed char,float>`**，
+  失败码 `reason[27]=RBRESP` 在 SD 侧（不是 LM/RD/WR 越界，不是野指针）。位置就是我新写的 `fccmp.cpp` 第 (c2) 段。
+- 处置（严格按硬约束）: **立刻停手；未重试；未做 soft_reset；未碰任何别的进程**。
+  safe_run 安全网在 ~1 秒内判定 FAIL 并 SIGKILL 了目标进程组（rc=137），异常**没有扩散**（只 +1 条，dev1 全程 RUNNING）。
+- 宿主 192.168.66.26: `ping 3/3, 0% loss (0.15~0.32ms)`，load 0.21，**未重启**。
+- 注意历史现场里的另外几条是旧账、不是本轮新增: `cl-0 token=178965 reason=0x20 RD_OVER_LM` /
+  `cl-1..3 token=43788 reason=0x40 WR_OVER_LM`（上一轮的 rd2_k 探针与 LM 二分探测）。
+
+### 11.1 改了什么（文件 + 行号）
+| 文件 | 动作 | 说明 |
+|---|---|---|
+| `/home/caden/orn_engine/fccmp.cpp` | **新增（219 行）** | 对比实验驱动：(a) 自写 kq8v2 GM2LM 内核 / (b) 官方 `fc<f16,f16,f16,short>` / (c) 官方 `gemm_int8` / (c2) 官方 `gemm_int8_maxptr` / (d) 官方 `fc_int8`。小尺寸先对拍（第 89~126 行, M=128 N=4096, 与生产 V2 布局一致），再上大尺寸。 |
+| `/home/caden/orn_engine/fccmp.o` `fccmp` | 新增后**已隔离** | 出事后回滚: `fccmp` → `fccmp.CRASHED`（去可执行位），删掉 `fccmp.o`。**不会再被误跑。** |
+| 引擎本体（`kq8.xpu` / `kq8r.xpu` / `orn3.cpp` / `serve2.py` / `start.sh`…） | **零改动** | 本轮没动过任何既有文件；"回滚到上一版"= 引擎本来就在上一版，真回滚目标不存在（已核 mtime）。 |
+- 崩溃点即 `fccmp.cpp` 的 (c2) 段: 调 `api::gemm_int8_maxptr<float,signed char,float>(...)`，最后一个参数 `max_c` 传 `nullptr`、
+  `max_a` 传 `nullptr`（头文件默认值就是 `nullptr`，但这是 SD-CDNN 派发路径，宽容度低）⇒ **该组合会打崩卡，已定性为禁止再用**。
+
+### 11.2 ★ 对比实验原始输出（异常发生前已完整拿到，共 3 组）
+```
+=== fccmp: 官方算子 vs 自写 GM2LM 内核 ===
+set_device(0)=0
+[a-对拍 m=128 n=4096] wait=0  maxabs=5.626e-06  relrms=0.0001%  y0=-0.02719 ref0=-0.02719
+
+########## 矩阵 M=4096 N=8192 (int8 权重 32.0 MB) ##########
+(a) kq8v2 自写 gm2lm   cl=4 co=16 :   13.013 ms  => 权重带宽   2.58 GB/s  wait=0 y0=0.8029
+(a) kq8v2 自写 gm2lm   cl=8 co=16 :   13.029 ms  => 权重带宽   2.58 GB/s  wait=0 y0=0.8029
+(b) 官方 fc<f16,f16,f16,s16> m=1 n=4096 k=8192 :    1.206 ms  => 权重带宽  55.66 GB/s  r=0 wait=0
+(c) 官方 gemm_int8 (f32激活/int8权) m=1 n=4096 k=8192 :    0.258 ms => 权重带宽 129.86 GB/s  r=0 wait=0 y0=66.7008
+(c2) gemm_int8_maxptr (max_b 传 per-row 数组) r=0 wait=-714  y0=66.7008 y7=-18.9528 y8=283.0551
+    ← 这一行之后卡异常, safe_run 判 FAIL, 进程组被杀, (d) fc_int8 与第二个矩阵 12288x4096 没跑到
+```
+
+### 11.3 ★ 结论: 官方算子比自写 GM2LM 内核对 21.6 倍（f16）/ 50 倍（int8）
+| 方案 | 权重字节读法 | 实测耗时 (32MB) | **GB/s** | 相对 (a) |
+|---|---|---|---|---|
+| (a) 自写 kq8v2（GM2LM，现状生产线） | 逐行 4352B 搬进核 | 13.013 ms | **2.58** | 1.0x |
+| (b) 官方 `fc<f16,f16,f16,short>` | 64MB fp16 权重 | 1.206 ms | **55.66** | **21.6x** |
+| (c) 官方 `gemm_int8`（float 激活 / int8 权重 / float 出） | 32MB int8 权重 | 0.258 ms | **129.86** | **50.3x** |
+- 交叉校验合理性: 板内 D2D 拷贝实测 512MB→66.3 / 256MB→62.3 GB/s（读+写合计 ≈126~133 GB/s 的片内 fabric）。
+  ⇒ 官方 int8 GEMM 的 129.86 GB/s **单向读**正好是这条 fabric 的读满速（≈93~103%）；(b) f16 是 40%。两个数字自洽，
+  且与"官方 fc 参考 13.7 GB/s/芯"同源（SD-CDNN 引擎），**说明瓶颈从来不是 HBM，而是自写内核走的 GM2LM 原语**。
+- ⚠ 如实标注两点保留: (1) (b)/(c) 是"循环内不插 wait、循环外一次 xpu_wait"的计时口径（与我们内核同一口径，可比）；
+  (2) (c) 的 129.86 GB/s 超过 DMA 引擎的口径（66~70），机制上是 SD 引擎独占读口，但我**没能独立复测**（复测 = 重试，被硬约束禁止）。
+- (a) 的 2.58 GB/s 与既有实测 2.71 GB/s 一致 ⇒ 计时口径没跑偏，(b)/(c) 的 21~50x 不是测量假象的量级。
+- **小尺寸对拍**: (a) 自写内核实测 `maxabs=5.6e-06, relrms=0.0001%` vs CPU double 参考 ⇒ 内核仍正确（铁律"先修对"满足）。
+
+### 11.4 回答用户的附带问题：官方 fc_int8 是否支持 per-channel / per-row scale
+- `func_dec.h` 里 int8 系列只有三个量化参数: **`max_a` / `max_b` / `max_c`**，**没有第四个量化参数**（第 747 行 `fc_int8`、第 707/734 行 `gemm_int8`）。
+  标量版签名: `fc_int8(ctx, TransA, TransB, M,N,K, const int8_t* A, float max_a, const int8_t* B, float max_b, int8_t* C, float max_c)`。
+- **唯一的"细粒度"出口是 `*_maxptr` 系列**（第 1412~1430 行）: `gemm_int8_maxptr/gemm_int16_maxptr/gemm_int31_maxptr` 把
+  `float max_a` 换成 `const float* max_a`、`max_b` 换成 `const float* max_b`（数组），另有 `float* max_c` + `bias` + `Activation_t`。
+  ⇒ 粒度最多到"**每个传入元素一个 scale**"，数组长度由调用方决定。
+- **但拿到的是"数 7"、不是"数 32-block"**: Q8_0 是每 32 个权重一个 fp16 scale；`max_b[n]` 无论按行还是按 tensor，都无法表达
+  "同一行内每 32 个权重换一个 scale"。所以 **官方 int8 路径不能精确复现 Q8_0 的量化格式**。
+- 想用官方路径，只有两条路（都需要重做权重量化，不改内核、但改数据布局）:
+  1. `gemm_int8(float A, int8 B, float max_b)` + 每行一个 max_b（per-row / per-output-channel 对称量化）⇒ 精度低于 Q8_0（每 32 一 scale）；
+  2. 先用 SD-CDNN 的 `quantization/findmax` 把权重转成 fp16（`fc<f16,f16,f16,short>`，已在 (b) 验到 55.66 GB/s，且**不损失精度**），
+     代价是权重从 9.2GB(int8) 涨到 18.4GB(fp16) ⇒ **单芯 8.06GB 装不下**，只能走"两块/分层"或把模型降到 Q4/fp8。
+- ⚠ 关于 (c2) 那次"per-row 观察": y0 与 (c) 逐位相同 (66.7008)，与"per-row scale 生效"的语义吻合（权重减半 + scale 减半 = 同值）；
+  但**该次调用 wait=-714 且随即触发卡异常**，所以**这个观察不构成结论**，需要一次干净的复测才能定 per-row/按 tensor —— 本轮被硬约束禁止复测，**故此问题只答到"头文件层面"**。
+
+### 11.5 本轮"没做成"的原因（如实）
+1. **卡异常把我按死在半路**: 唯一没跑完的就是第二个矩阵 `M=12288 N=4096`（ffn 形状），以及 (d) `fc_int8`。
+   按硬约束"一出现异常立即停手、不许重试、不许 soft_reset"，**我没有重跑**。
+2. **tok/s 没有任何提升**: 引擎（`orn3` + `serve2.py`）本轮**一行没改** ⇒ tok/s 仍 = **0.560~0.563**（未提升）。
+   本轮的全部价值是**决策级证据**：官方算子 21.6x（f16）/ 50.3x（int8）于自写 GM2LM ⇒ "把 GEMV 换成官方 op"这条路是**实测成立**的。
+3. **服务没能拉回来**: dev0 现在是 `ERROR`（dev1 `RUNNING`），`start.sh` 会因"两芯非 RUNNING"主动拒绝。
+   硬约束禁止我 soft_reset，所以 8090 **处于停止状态**。恢复命令（一条，用户决定）:
+   `/usr/local/xpu-4.33.0/tools/soft_reset 0` 然后 `bash /home/caden/ornc/start.sh`。
+4. **没做的备选方案**: gm2sm / 一行拆多核 / 一次搬多行 —— 用户中途更正后把判据改成了"官方算子能不能替代"，
+   (a) 的 `cl=8 co=16` 顺带复测了"加核无用"（2.58 vs 2.58 GB/s，与上一轮结论一致）；gm2sm 未探（本轮优先做 (b)/(c) 对比）。
+
+### 11.6 本轮最终状态
+- 卡异常 = **17**（起 16，新增 1，见 11.1/本节顶部；未扩散，dev1 全程 RUNNING）
+- 两芯 state = **dev0 ERROR / dev1 RUNNING**；持卡进程 = 0；未做 soft_reset；未重启任何服务
+- 8090 = **未监听**（本轮按规程先 stop.sh 停服，之后卡 wedge 导致无法 start）
+- 宿主 NAS 192.168.66.26 = ping 通 0% loss，未重启；本机 uptime 2:37，load 0.21
+- 证据: `orn_engine/safe_20260921_152401.log`（+ .target / .exceptions）、`safe_20260921_152404.log`、`safe_20260921_152438.log`、
+  `/proc/xpu/dev0/errtask`（崩溃现场）、`orn_engine/fccmp.CRASHED` + `fccmp.cpp`

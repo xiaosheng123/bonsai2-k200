@@ -1,0 +1,8 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+__global__ void lm_k(float *o) {
+    __local__ unsigned char buf[24576];
+    buf[0] = 1; buf[24576-1] = 2;
+    __local__ int l[1]; l[0] = (int)buf[0] + (int)buf[24576-1];
+    LM2GM(l, o, 4);
+}

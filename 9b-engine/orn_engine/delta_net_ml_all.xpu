@@ -1,0 +1,104 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+
+#define PACKED_PER_HV (2 + KHD + KHD + VHD)  // 386 floats = 1544 bytes
+#define S_PER_HV (RPC * KHD)  // 1024 floats = 4096 bytes
+
+// ==== multi-slot ALL-LAYER delta-net: M slots x NL layers, S fully resident on device ====
+// S     : [M][NL][NVH][VHD][KHD] - per-slot, per-layer persistent state
+// packed : [M][NL][NVH][PACKED_PER_HV] - host packs g,b,k,q,v per (slot,layer,hv)
+// outT   : [M][NL][NVH][VHD]
+// Single launch processes all layers and all slots: S is loaded once, updated in-place,
+// passed straight to the next layer. No H2D/D2H of S between layers.
+__global__ void dn_k_ml_all(
+    float *S,
+    const float *packed_in,
+    float *outT,
+    int M,
+    int NL
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;
+
+    __local__ float kl[KHD];
+    __local__ float ql[KHD];
+    __local__ float vl[VHD];
+    __local__ float lr[RPC][KHD];
+    __local__ float ob[RPC];
+    __local__ float packed_l[PACKED_PER_HV];
+
+    float qscale = 1.0f / sqrt((float)KHD);
+    int r0 = cid * RPC;
+
+    // S stride per slot-layer: NVH*VHD*KHD
+    size_t sl_stride = (size_t)NVH * VHD * KHD;
+
+    for (int l = 0; l < NL; l++) {
+        for (int t = 0; t < M; t++) {
+            // pointer to this (slot=t, layer=l) S block
+            __global_ptr__ float *S_t = S + ((size_t)t * NL + (size_t)l) * sl_stride;
+            for (int hv = hstart; hv < hend; hv++) {
+                int hk = hv % 16;
+                __global_ptr__ float *sp = S_t + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+                // Load this slot/layer/hv S (8 rows)
+                GM2LM(sp, lr, S_PER_HV * 4);
+
+                __global_ptr__ const float *src = packed_in
+                    + (((size_t)t * NL + (size_t)l) * NVH + hv) * PACKED_PER_HV;
+                GM2LM(src, packed_l, PACKED_PER_HV * 4);
+
+                float eg = packed_l[0];
+                float bb = packed_l[1];
+                const float *kp = packed_l + 2;
+                const float *qp = packed_l + 2 + KHD;
+                const float *vp = packed_l + 2 + KHD + KHD;
+
+                for (int i = 0; i < KHD; i++) { kl[i] = kp[i]; }
+                for (int i = 0; i < KHD; i++) { ql[i] = qp[i]; }
+                for (int i = 0; i < VHD; i++) { vl[i] = vp[i]; }
+
+                for (int rr = 0; rr < RPC; rr++) {
+                    int row = r0 + rr;
+                    float sk = 0.f;
+                    for (int i = 0; i < KHD; i++) {
+                        float a0 = lr[rr][i] * eg;
+                        lr[rr][i] = a0;
+                        sk += a0 * kl[i];
+                    }
+                    float d = (vl[row] - sk) * bb;
+                    float so = 0.f;
+                    for (int i = 0; i < KHD; i++) {
+                        float a0 = lr[rr][i] + kl[i] * d;
+                        lr[rr][i] = a0;
+                        so += a0 * ql[i];
+                    }
+                    ob[rr] = so * qscale;
+                }
+                // Store S back (in-place, same block)
+                LM2GM(lr, sp, S_PER_HV * 4);
+                // Store output
+                __global_ptr__ float *ot = outT + (((size_t)t * NL + (size_t)l) * NVH + hv) * VHD + r0;
+                LM2GM(ob, ot, RPC * 4);
+            }
+        }
+    }
+}
+
+void run_delta_net_merged_ml_all(
+    int clusters, int cores, int M, int NL,
+    float *S, const float *packed_in, float *outT
+) {
+    dn_k_ml_all<<<clusters, cores>>>(S, packed_in, outT, M, NL);
+}

@@ -1,0 +1,99 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// ==== multi-slot ALL-LAYER delta-net, core-blocked layout ====
+// 关键优化: 每核的 S 在全局内存连续 (16KB), 一次 GM2LM/LM2GM 搬完,
+// 消除逐 hv 小搬运的固定延迟 (64次/核 -> 2次/核)。
+//
+// S     布局 [M][NL][CL][CID][HV_LOCAL=4][RPC=8][KHD]
+//   - 每核 (cl,cid) 负责该 cl 分到的 4 个 hv 的固定 8 行 (r0=cid*8)
+//   - 每核连续 4*8*128 = 4096 floats = 16KB
+// packed 布局 [M][NL][CL][CID][HV_LOCAL=4][PPH]
+//   - 每核 4 hv 的 packed, 连续 4*386 = 1544 floats
+// outT   布局 [M][NL][CL][CID][HV_LOCAL=4][RPC=8]
+//   - 每核 4 hv 的输出 8 行
+//
+// 每层每核: 1 次 GM2LM(S 16KB) + 1 次 GM2LM(packed 6KB) + 计算 + 1 次 LM2GM(S) + 1 次 LM2GM(out)
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+#define HV_PER_CL (NVH / 8)     // 4 hv per cluster (8 clusters, 32 hv)
+#define PACKED_PER_HV (2 + KHD + KHD + VHD)  // 386
+
+// per-core strides
+#define CORE_S  (HV_PER_CL * RPC * KHD)          // 4*8*128 = 4096 floats
+#define CORE_P  (HV_PER_CL * PACKED_PER_HV)      // 4*386 = 1544 floats
+#define CORE_O  (HV_PER_CL * RPC)                // 4*8 = 32 floats
+
+__global__ void dn_k_ml_core(
+    float *S,
+    const float *packed_in,
+    float *outT,
+    int M,
+    int NL
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    if (ncl != 8) return;   // 本 kernel 固定 8 cluster
+
+    __local__ float lr[HV_PER_CL][RPC][KHD];     // 4*8*128 = 16KB
+    __local__ float pl[HV_PER_CL][PACKED_PER_HV];// 4*386 = 6KB
+    __local__ float ob[HV_PER_CL][RPC];
+
+    float qscale = 1.0f / sqrt((float)KHD);
+    // 每核在全局的偏移 (floats)
+    size_t slot_stride = (size_t)ncl * NC * CORE_S;      // 每槽 (t,l) 的 S = 8cl*16cid*16KB
+    size_t pack_stride = (size_t)ncl * NC * CORE_P;
+    size_t out_stride  = (size_t)ncl * NC * CORE_O;
+    size_t core_off = ((size_t)cl * NC + cid) * CORE_S;
+
+    for (int l = 0; l < NL; l++) {
+        for (int t = 0; t < M; t++) {
+            __global_ptr__ float *S_t = S + ((size_t)t * NL + (size_t)l) * slot_stride + core_off;
+            __global_ptr__ const float *P_t = packed_in + ((size_t)t * NL + (size_t)l) * pack_stride
+                + ((size_t)cl * NC + cid) * CORE_P;
+            __global_ptr__ float *O_t = outT + ((size_t)t * NL + (size_t)l) * out_stride
+                + ((size_t)cl * NC + cid) * CORE_O;
+
+            GM2LM(S_t, lr, CORE_S * 4);          // 16KB
+            GM2LM(P_t, pl, CORE_P * 4);          // 6KB
+
+            for (int hv = 0; hv < HV_PER_CL; hv++) {
+                const float *pk = pl[hv];
+                float eg = pk[0], bb = pk[1];
+                const float *kp = pk + 2, *qp = pk + 2 + KHD, *vp = pk + 2 + KHD + KHD;
+                for (int rr = 0; rr < RPC; rr++) {
+                    float sk = 0.f;
+                    for (int i = 0; i < KHD; i++) {
+                        float a0 = lr[hv][rr][i] * eg;
+                        lr[hv][rr][i] = a0;
+                        sk += a0 * kp[i];
+                    }
+                    float d = (vp[cid * RPC + rr] - sk) * bb;
+                    float so = 0.f;
+                    for (int i = 0; i < KHD; i++) {
+                        float a0 = lr[hv][rr][i] + kp[i] * d;
+                        lr[hv][rr][i] = a0;
+                        so += a0 * qp[i];
+                    }
+                    ob[hv][rr] = so * qscale;
+                }
+            }
+            LM2GM(lr, S_t, CORE_S * 4);          // 16KB
+            LM2GM(ob, O_t, CORE_O * 4);          // 128B
+        }
+    }
+}
+
+void run_delta_net_merged_ml_core(
+    int clusters, int cores, int M, int NL,
+    float *S, const float *packed_in, float *outT
+) {
+    dn_k_ml_core<<<clusters, cores>>>(S, packed_in, outT, M, NL);
+}

@@ -1,0 +1,13 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+// Self-test: kernel writes known value to buf, then reads it back.
+// Tests global-memory read-after-write WITHIN a single kernel (no H2D involved).
+// buf[0..31]: kernel writes 100+core_id, then reads back, puts into out.
+__global__ void selfrw_k(int *buf, int *out, int n) {
+    int tid = core_id();
+    if (tid < n) buf[tid] = 100 + tid;
+    sync();
+    if (tid < n) out[tid] = buf[tid];
+}
+void run_selfrw(int *buf, int *out, int n) { selfrw_k<<<1, 32>>>(buf, out, n); }

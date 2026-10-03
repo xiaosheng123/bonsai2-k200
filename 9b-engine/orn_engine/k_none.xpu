@@ -1,0 +1,8 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+__global__ void map_k(int *o) {
+    int c = cluster_id(), k = core_id();
+    if (c < 16 && k < 64) o[c * 64 + k] = c * 100 + k + 1;
+}
+void run_map(int *o, int cl, int co) { map_k<<<cl, co>>>(o); }

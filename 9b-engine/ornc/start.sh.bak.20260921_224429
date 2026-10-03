@@ -1,0 +1,21 @@
+#!/bin/bash
+# start.sh — 起 8090 单端口服务 (引擎在 safe_run 安全网下, 强制关思考)
+cd /home/caden/ornc || exit 1
+export K200_ENGINE=/home/caden/orn_engine/orn
+export K200_MODEL_PATH=/home/caden/orn/Ornith-1.5-9B-Q8_0.gguf
+export K200_PORT=8090
+export K200_NGEN=64
+export K200_MODEL=ornith-1.5-9b-k200
+export K200_SAFEMAXSEC=14400
+export K200_RAWTOK=1
+setsid nohup python3 /home/caden/ornc/serve.py >> /home/caden/ornc/serve.log 2>&1 < /dev/null &
+echo "server pid=$!"
+# 等引擎就绪 (最多 90s)
+for i in $(seq 1 45); do
+  sleep 2
+  if timeout 5 curl -s http://127.0.0.1:8090/health 2>/dev/null | grep -q '"ready": true'; then
+    echo "READY after ${i}x2s"; exit 0
+  fi
+done
+echo "NOT READY in 90s"; timeout 5 curl -s http://127.0.0.1:8090/health; echo
+exit 1

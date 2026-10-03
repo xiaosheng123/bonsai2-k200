@@ -1,0 +1,47 @@
+=== stage20 开始 2026-09-22 05:52:02 | 异常起 = 17 | reset 4/4 ===
+--- [1] 第 20 轮新算子/新用法 极小尺寸单发 ---
+########## p_redmin3 05:52:10 ##########
+[stage20] p_redmin3 safe_run rc=0
+########## p_addrow 05:52:12 ##########
+[stage20] p_addrow safe_run rc=0
+########## p_addrowM 05:52:15 ##########
+[stage20] p_addrowM safe_run rc=0
+########## p_maxabs 05:52:18 ##########
+[stage20] p_maxabs safe_run rc=0
+########## p_maxabsM 05:52:20 ##########
+[stage20] p_maxabsM safe_run rc=0
+########## p_geluz 05:52:23 ##########
+[stage20] p_geluz safe_run rc=0
+########## p_geluzM 05:52:25 ##########
+[stage20] p_geluzM safe_run rc=0
+--- 探针结果 ---
+[probe] reduce MIN 3D r=0 wait=0 relrms=0.00000%  y0=-2.922546 ref0=-2.922546
+[probe] ==== redmin3 rc=0 ====
+[probe] elementwise_add_2d 行广播 a[m,n] + b[1,n]  m=8 n=45
+[probe] add_2d[a(m,n)+b(1,n)] r=0 wait=0 relrms=0.00000%  (应 =0, 加法精确)
+[probe] ==== addrow rc=0 ====
+[probe] elementwise_add_2d 行广播 a[m,n] + b[1,n]  m=128 n=4320
+[probe] add_2d[a(m,n)+b(1,n)] r=0 wait=0 relrms=0.00000%  (应 =0, 加法精确)
+[probe] ==== addrowM rc=0 ====
+[probe] ★ 卡上 max|A| 归一链  m=8 nc=4 cs=16 (A 含负值)
+[probe] max|A| 链 r=0 wait=0 | absmax vs 主机 fabsf relrms=0.00000% | Mc maxabs差=0.000e+00 | f=Mc/absmax relrms=0.00000%
+[probe] ==== maxabs rc=0 ====
+[probe] ★ 卡上 max|A| 归一链  m=64 nc=45 cs=96 (A 含负值)
+[probe] max|A| 链 r=0 wait=0 | absmax vs 主机 fabsf relrms=0.00000% | Mc maxabs差=0.000e+00 | f=Mc/absmax relrms=0.00000%
+[probe] ==== maxabsM rc=0 ====
+[probe] gelu 出/入异缓冲 + padding 尾部保持 0  m=8 n=96 nreal=80
+[probe] gelu r=0 wait=0 relrms=0.01619%  padding 尾部非 0 个数=0 (期望 0)
+[probe] ==== geluz rc=0 ====
+[probe] gelu 出/入异缓冲 + padding 尾部保持 0  m=64 n=4320 nreal=4304
+[probe] gelu r=0 wait=0 relrms=0.01539%  padding 尾部非 0 个数=0 (期望 0)
+[probe] ==== geluzM rc=0 ====
+--- [2] 768² a: VIS_CARDFFN=0 VIS_HEAP=0 (基线, 期望与第19章落盘字节相同) ---
+########## n7a 05:52:28 ##########
+[stage20] n7a safe_run rc=4
+--- [3] 768² b: VIS_CARDFFN=0 VIS_HEAP=1 (只开 B, 期望与 a 字节相同) ---
+########## n7b 05:52:33 ##########
+[stage20] n7b safe_run rc=0
+--- [4] 768² c: VIS_CARDFFN=1 VIS_HEAP=1 (A全卡 + B) ---
+########## n7c 05:52:53 ##########
+[stage20] n7c safe_run rc=3
+ABORT

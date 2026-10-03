@@ -1,0 +1,8 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+__global__ void dr_k(const int *in, int *out, int n) {
+    int tid = cluster_id() * core_num() + core_id();
+    if (tid < n) out[tid] = in[tid];
+}
+void run_dr(const int *in, int *out, int n) { dr_k<<<8, 16>>>(in, out, n); }

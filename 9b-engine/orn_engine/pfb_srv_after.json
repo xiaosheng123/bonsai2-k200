@@ -1,0 +1,132 @@
+{
+ "tag": "AFTER2048",
+ "items": [
+  {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 1.51,
+    "wall_secs": 1.51,
+    "finish_reason": "stop",
+    "generated_tokens": 9,
+    "context_limit": 2048,
+    "prefill_ms_per_tok": 58.8,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 5.9611,
+    "prompt_chars": 71,
+    "nothink": true,
+    "sid": "440ee0853ad1e99f",
+    "prompt_tokens": 13,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=13 tok 用时 0.76s (58.8 ms/tok, 全量 复用0 tok) | 生成 9 tok 用时 0.57s = 15.870 tok/s | gemv 2838 次"
+   },
+   "usage": {
+    "prompt_tokens": 13,
+    "completion_tokens": 9,
+    "total_tokens": 22
+   },
+   "wall": 1.52,
+   "name": "golden"
+  },
+  {
+   "text": "7",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 39.69,
+    "wall_secs": 39.69,
+    "finish_reason": "stop",
+    "generated_tokens": 1,
+    "context_limit": 2048,
+    "prefill_ms_per_tok": 38.8,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.0252,
+    "prompt_chars": 1878,
+    "nothink": true,
+    "sid": "24be0b1470e2554a",
+    "prompt_tokens": 1002,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=1002 tok 用时 38.92s (38.8 ms/tok, 全量 复用0 tok) | 生成 1 tok 用时 0.09s = 10.951 tok/s | gemv 2983 次"
+   },
+   "usage": {
+    "prompt_tokens": 1002,
+    "completion_tokens": 1,
+    "total_tokens": 1003
+   },
+   "wall": 39.7,
+   "name": "long14_messages"
+  },
+  {
+   "text": "15",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 12.75,
+    "wall_secs": 14.06,
+    "finish_reason": "stop",
+    "generated_tokens": 2,
+    "context_limit": 2048,
+    "prefill_ms_per_tok": 30.2,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.1569,
+    "prompt_chars": 729,
+    "nothink": true,
+    "sid": "c159ee262efea973",
+    "prompt_tokens": 406,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=406 tok 用时 12.24s (30.2 ms/tok, 全量 复用0 tok) | 生成 2 tok 用时 0.13s = 15.078 tok/s | gemv 6086 次"
+   },
+   "usage": {
+    "prompt_tokens": 406,
+    "completion_tokens": 2,
+    "total_tokens": 408
+   },
+   "wall": 14.07,
+   "name": "plain_k20"
+  },
+  {
+   "text": "15",
+   "finish": "stop",
+   "k200": {
+    "gen_secs": 42.24,
+    "wall_secs": 80.82,
+    "finish_reason": "stop",
+    "generated_tokens": 2,
+    "context_limit": 2048,
+    "prefill_ms_per_tok": 40.6,
+    "vision_tokens": [],
+    "image_encode": "",
+    "tok_per_s": 0.0474,
+    "prompt_chars": 1689,
+    "nothink": true,
+    "sid": "28f1434a0390453f",
+    "prompt_tokens": 976,
+    "prefill_reused_tokens": 0,
+    "engine_prefill": "[orn] prompt=976 tok 用时 39.63s (40.6 ms/tok, 全量 复用0 tok) | 生成 2 tok 用时 0.23s = 8.519 tok/s | gemv 6505 次"
+   },
+   "usage": {
+    "prompt_tokens": 976,
+    "completion_tokens": 2,
+    "total_tokens": 978
+   },
+   "wall": 80.82,
+   "name": "plain_k50"
+  },
+  {
+   "err": "RemoteDisconnected('Remote end closed connection without response')",
+   "wall": 1.4940683841705322,
+   "name": "plain_k80"
+  },
+  {
+   "err": "URLError(ConnectionRefusedError(111, 'Connection refused'))",
+   "wall": 0.0003895759582519531,
+   "name": "plain_k95"
+  },
+  {
+   "err": "URLError(ConnectionRefusedError(111, 'Connection refused'))",
+   "wall": 0.00020837783813476562,
+   "name": "sess_t1"
+  }
+ ]
+}

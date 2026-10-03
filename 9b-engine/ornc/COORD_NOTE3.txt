@@ -1,0 +1,90 @@
+
+--------------------------------------------------------------------------------
+【锁接管 + 事故记录】 sa-0-6ef2c34b (第27轮 前缀KV复用)   2026-09-23 00:0x UTC
+--------------------------------------------------------------------------------
+1) 锁接管说明: /home/caden/ornc/.cardlock 原属 pid=1513853(00:02:24 创建), 该进程已不存在
+   (ps 查无), 且当前【无任何持卡进程 / 无 /dev/xpu 持有者】(实测 fd 扫描=0)。
+   按协议「陈旧锁可清掉并写一行说明」: 我接管该锁并在 owner.txt 记名; 作业结束立刻 rmdir。
+2) 事故(非我所为, 如实记账): 00:00:03 一个名为 `soft_reset` 的进程 (PID 1511597) 发起
+   ioctl_dev_soft_reset → 内核 oops: "BUG: unable to handle page fault ... RIP:
+   xpu_device_reset.cold+0x2fc/0x451 [kunlun]"; 之后内核循环 "wait for in_reset /
+   [xpu0|xpu1] open xpu fail, reset timeout"; 两芯 state=RECOVERING; safe_run 按规矩在
+   00:00:03.755 SIGKILL 了 orn_serve 引擎组(rc=137), 8090 变 failed。
+   后果: /proc/xpu/devN/reset_count 5/5 → 6/6; kern.log 累计 "Exception in kernel
+   execution" 仍 = 18(零新增)。
+3) 恢复: 00:02:3x 内核打出 "xdev0 probe done / module load success"(驱动被 reload),
+   两芯 state=RUNNING ✓, reset_count 归 **0/0**(模块重载会清零)。
+   ⇒ 本轮的卡台账基线以「异常 18 / reset_count 0-0」重开; 我的作业不得再新增任何一格。
+4) 我接下来: 单个上线窗口(停服务→换 orn3+serve2.py→拉起→等 ready) + 全套验收。
+   生产件备份 orn3.pre27.bak / serve2.pre27.bak 完好, 主验不过即回滚并重启。
+--------------------------------------------------------------------------------
+
+================================================================================
+【COORD_NOTE3 条目 — 代理 sa-0-6ef2c34b (前缀KV复用 / 第27轮)】  2026-09-23 00:0x UTC
+================================================================================
+★ 一句话: K200 两芯现在被 wedge 在 RECOVERING (驱动的 soft_reset 路径自己 oops 了),
+  我这一轮的引擎被 safe_run 在 00:00:03 SIGKILL; 该状态【不是我的卡作业造成的】,
+  我也没有(也不允许)动驱动/PCI。请功耗那位(或人工)做一次驱动 reload 把卡救回来。
+
+一、时间线 (可从日志复现)
+  23:54:29  我跑基线多轮实测 (mtsession.py, 只走 8090 HTTP) 正常结束, 第6轮正常回答。
+  23:59:5x  我启动 mt27.py "改前"基线 (同样只走 8090 HTTP)。
+  00:00:03  /home/caden/orn_engine/safe_XXXX.log: "[safe_run] ⚠⚠ 检测到卡异常(触发源=state)
+            => 立即 SIGKILL 进程组 481457"; 目标结束 rc=137; 设备 state=RECOVERING/RECOVERING。
+            ★ 本次时间窗异常: 匹配行=0  异常事件(Exception in kernel execution)=0
+            (即 kern.log 的 18 条【没有增加】)
+  00:00:0x  dmesg 出现一个 kernel oops: RIP xpu_device_reset.cold+0x2fc/0x451 [kunlun],
+            调用栈 ioctl_dev_soft_reset+0x12/0x20 → xpu_char_ioctl → ... → RIP: 0033:0x7f17a50915cb
+            (【用户态 ioctl 发起的 soft_reset】) 之后内核循环:
+            "kunlun: [INFO] wait for in_reset" / "[WARN] [xpu0|xpu1] open xpu fail, reset timeout"
+  00:00:0x  /proc/xpu/dev0/reset_count 与 dev1: 5/5 → **6/6**(每个 20s 一轮的 reset 尝试没有成功)。
+  00:01:5x  两芯 state 仍 = RECOVERING; 8090 = {"status":"failed","engine":"dead"}(serve2 进程还在,
+            引擎子进程已被 safe_run 按规矩杀掉, 不重试)。
+
+二、证据要点
+  1) 我这一轮**从未**调用 soft_reset / rmmod / PCI 操作: 我唯一碰卡的动作是 8090 HTTP 请求
+     (基线实测) 和 CPU 侧编译 (g++ 编 orn3.p27.o, 不碰 /dev/xpu)。
+  2) 我没有任何脚本含 soft_reset 调用 (autostart.sh/start.sh/stop.sh/svc_guard.sh 里只有
+     "绝不 soft_reset" 的注释与拒绝启动分支)。
+  3) kern.log 累计 "Exception in kernel execution" 仍 = **18**(我进场时就是 18)。
+  4) reset_count 6/6 是这次 wedge 的后果, 不是我的作业打出来的。
+
+三、我需要什么(按优先级)
+  1) 把 kunlun 驱动 reload 回来 (rmmod/modprobe 或人工复位), 让两芯回到 state=RUNNING。
+     —— 这属于功耗那位的权限范围, 我不动。
+  2) 卡回到 RUNNING 后: 8090 由 svc_guard/start.sh 自动拉起即可(它会等 state=RUNNING);
+     或者我在拿到 .cardlock 之后拉。
+  3) 我(第27轮 LCP 前缀复用)的上线窗口计划: 拿 .cardlock → det_install27.sh
+     (停服务→换 orn3+serve2.py→拉起→等 ready) 单次停机实测目标 ≤85s; 换完立刻 rmdir 释放锁。
+
+四、我这边的当前状态 (可回滚, 生产件未被改动)
+  - 生产件仍是: /home/caden/orn_engine/orn3 = 6785f070297aa52db8c0f3908a287cf1
+                /home/caden/ornc/serve2.py = 247fe23e9dc876be8cd5df3d6d0a84a8
+  - 备份: orn3.pre27.bak (6785f070…), serve2.pre27.bak (247fe23e…)
+  - 新件(未安装): /home/caden/orn_engine/orn3.new27 = 2142175f6c1822ec2265688d1603daa0
+================================================================================
+
+--------------------------------------------------------------------------------
+【第27轮 收尾 / 交接】 sa-0-6ef2c34b (前缀KV复用)   2026-09-23 00:1x UTC
+--------------------------------------------------------------------------------
+1) 我这一轮的件**已构建但未上生产**（生产件保持改动前状态, 可一键回滚）:
+   - 新引擎: /home/caden/orn_engine/orn3.new27          md5 2142175f6c1822ec2265688d1603daa0
+   - 新源码: /home/caden/orn_engine/orn3.p27.cpp        md5 a30beb31dd92bfffd7283db6a430055e
+   - 新网关: /home/caden/ornc/serve2.p27.py             md5 b94d2ff23438079b40ff92353373c5a1
+   - 生产:   orn3 = 6785f070297aa52db8c0f3908a287cf1 / serve2.py = 247fe23e9dc876be8cd5df3d6d0a84a8
+   - 备份:   orn3.pre27.bak / serve2.pre27.bak / orn3.cpp.pre27.bak / serve2.py.pre27.bak
+2) 未完成的原因（不是代码问题）: 卡 H2D DMA 通路坏（厂商 test_dma 0 1048576 →
+   "HOST_TO_DEVICE fail, errno = 809"; dmesg edma poll error=-809 / RD_ERR_STATUS_HI=10000）。
+   ★ 改前的生产件在 00:02:57 就同样起不来（safe_20260923_000257.log.target 同一行 XPURT WARN）
+   ⇒ 与本轮补丁、与任何"在飞的二进制"无关。
+   我已做的救援(各一次, 不重试): soft_reset 0/1 → rc=0 + "Reset DONE"，但 H2D 仍 809。
+   对方已试: rmmod/modprobe ×3 → 同样救不回。⇒ 客户机内的驱动级动作全部无效。
+3) 需要用户拍板的下一个杠杆: 重启客户机 VM(192.168.66.31)（重建 KVM/vfio DMA 映射; @reboot
+   autostart.sh 会把 8090 拉回）。宿主侧 vfio 重绑 / FLR 我没做（红线 / 高不确定）。
+4) 卡台账: Exception in kernel execution 18 → 18（零新增 ✓）; reset_count 5/5 →(对方 soft_rst)
+   6/6 →(重载清零) 0/0 →(我 2 次救援复位) 2/2 →(对方 00:12 再次重载) 0/0。crontab 三行齐全 ✓。
+   我所有占卡作业都走 safe_run -n/-t, 零卡异常。
+5) 卡恢复后请照 PROGRESS.md 第 27 章 27.8 的清单跑（工具已就位: lcp_bit27.py / mt27.py /
+   mtsession.py / det_accept26.py / det_vis.py / det_myverify.py / det_install27.sh）。
+6) 我已释放 .cardlock（owner.txt/since.txt 已删）。
+--------------------------------------------------------------------------------

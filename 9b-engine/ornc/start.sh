@@ -1,0 +1,84 @@
+#!/bin/bash
+# =============================================================================
+# start.sh — 8090 单端口服务的【唯一启动入口】
+#
+# ★ 命名约定 (start / stop / restart / status 四个脚本必须保持一致, 不许再各叫各的):
+#     服务进程 : /home/caden/ornc/serve2.py        (python3)
+#     引擎进程 : /home/caden/orn_engine/orn4       (包装: safe_run.sh -n orn_serve)
+#     日志     : /home/caden/ornc/serve2.log
+#   ★ 任何改名都必须同步改 stop.sh 里的 PAT_* 列表 —— 上一轮就是因为 start 起的是
+#     serve2.py/orn3 而 stop 脚本找不到, 把带病引擎留在了卡上。
+#
+#   纪律: 只做「检查 + 启动」。状态不对就报错退出, 绝不 soft_reset、绝不重试刷屏。
+#         v2 引擎缺失时自动退回 v1 (serve.py + orn), 保证服务总能起来。
+# =============================================================================
+set -u
+cd /home/caden/ornc || exit 1
+
+PORT=8090
+MODEL_PATH=/home/caden/orn/Ornith-1.5-9B-Q8_0.gguf
+# v2 = 提速版 (双芯行分裂 + 同 x 拼接 + 会话级 KV/状态复用); 内核 kq8 一行没改
+if [ -x /home/caden/orn_engine/orn3.cb ] && [ -f /home/caden/ornc/serve2.py ]; then
+  ENGINE=/home/caden/orn_engine/orn3.cb
+  SERVER=/home/caden/ornc/serve2.py
+  SLOG=/home/caden/ornc/serve2.log
+  SAFEMAX=28800
+else
+  ENGINE=/home/caden/orn_engine/orn
+  SERVER=/home/caden/ornc/serve.py
+  SLOG=/home/caden/ornc/serve.log
+  SAFEMAX=14400
+fi
+
+export K200_ENGINE="${K200_ENGINE:-$ENGINE}"
+export K200_MODEL_PATH="${K200_MODEL_PATH:-$MODEL_PATH}"
+export K200_PORT="$PORT"
+export K200_PORT2="8091"
+export K200_SOLO2="0"
+export K200_NGEN=512   # ★ 默认生成上限(原来 64 太小, 客户端未指定 max_tokens 时只回 64 token)
+export K200_SSM_DEV=1
+export K200_ATN=1
+export K200_PROF=1   # S1 A/B 分桶
+export K200_ENGINE_MAXT=8192   # ★ 与 orn3.cb 的编译期 MAXT=8192 一致
+export K200_PROMPT_BUDGET=7800 # ★ 提示词预算, 留生成空间
+export K200_MAX_COLD_PREFILL_TOK=0   # ★ 2026-09-26 恢复旧行为: 不拒绝长冷预填充(慢但能用), 闸门关闭  # 长上下文冷预填充上限(防卡死), DSH 大载荷靠前缀复用绕过
+export K200_MODEL=ornith-1.5-9b-k200
+export K200_SAFEMAXSEC="$SAFEMAX"
+export K200_RAWTOK=1
+export K200_MAX_COLD_PREFILL_TOK=${K200_MAX_COLD_PREFILL_TOK:-0}   # 第33轮: 1500 太小, DSH 长上下文全被误拒
+
+echo "[start.sh] 服务=$SERVER 引擎=$ENGINE 日志=$SLOG"
+
+# 0) 已经有健康服务 -> 不重复起 (双份会互挤两芯 HBM)
+if timeout 5 curl -s "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"status": "ok"'; then
+  echo "[start.sh] 8090 已有健康服务, 不重复起"; exit 0
+fi
+
+# 1) 残留 (引擎死了 serve 还在 / 重复的安全网包装) -> 交给 stop.sh 清干净
+if pgrep -f 'serve[0-9]*\.py' >/dev/null 2>&1 || pgrep -f 'safe_run\.sh -n orn' >/dev/null 2>&1; then
+  echo "[start.sh] 发现残留服务/安全网包装, 先 stop.sh 清干净"
+  bash /home/caden/ornc/stop.sh || true
+fi
+
+# 2) 两芯必须 RUNNING —— 不 soft_reset, 不自作主张
+for d in 0 1; do
+  st="$(cat /proc/xpu/dev$d/state 2>/dev/null)"
+  echo "[start.sh] 前置 dev$d state=$st"
+  if [ "$st" != "RUNNING" ]; then
+    echo "[start.sh] 拒绝启动: dev$d 不是 RUNNING (交人工处理, 不自动 reset)"; exit 2
+  fi
+done
+
+# 3) 起服务 (独立会话, 与 ssh 断开无关)
+setsid nohup python3 "$SERVER" >> "$SLOG" 2>&1 < /dev/null &
+echo "[start.sh] server pid=$!"
+
+# 4) 等就绪 (引擎要先把权重常驻 HBM, 双芯 ~20s; 给 120s 余量)
+for i in $(seq 1 60); do
+  sleep 2
+  if timeout 5 curl -s "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ready": true'; then
+    echo "[start.sh] READY after $((i*2))s"; exit 0
+  fi
+done
+echo "[start.sh] NOT READY in 120s"; timeout 5 curl -s "http://127.0.0.1:$PORT/health"; echo
+exit 1

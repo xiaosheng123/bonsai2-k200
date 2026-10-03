@@ -1,0 +1,471 @@
+{
+ "solo": {
+  "你好": {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "sha": "bb3f31771d2996de",
+   "ntok": 9,
+   "wall": 0.53,
+   "fp": "★ GEN 9 tok ids=c0fd17ebd3dc35a6 bytes=316cbcaccf26db84 prompt=5406daa979cd4e5b(13 tok)",
+   "reused": 13,
+   "new": 0,
+   "ptok": 13,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 2 queued ptok=13 maxtok=64 solo=0 sid=440ee0853ad1e99f",
+    "pref": "__SPREF__ 2 reused=13 new=0 prefill_s=0.000 lcp=13 ptok=13",
+    "reused": 13,
+    "new": 0,
+    "prefill_s": 0.0,
+    "lcp": 13,
+    "active": "__SACTIVE__ 2 0"
+   }
+  },
+  "1+1等于几": {
+   "text": "1+1 等于 **2**。\n\n这是一个最基本的加法运算：\n- 1 + 1 = 2\n\n如果你有其他数学问题，我很乐意帮你解答！😊",
+   "sha": "99a42586b9339e0e",
+   "ntok": 36,
+   "wall": 2.73,
+   "fp": "★ GEN 36 tok ids=d4b3e3dadd2dbe69 bytes=ed8708791cf71980 prompt=4ff5e7c44b1133d6(17 tok)",
+   "reused": 0,
+   "new": 17,
+   "ptok": 17,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 3 queued ptok=17 maxtok=64 solo=0 sid=304ed16a6a7497e6",
+    "pref": "__SPREF__ 3 reused=0 new=17 prefill_s=0.607 lcp=0 ptok=17",
+    "reused": 0,
+    "new": 17,
+    "prefill_s": 0.607,
+    "lcp": 0,
+    "active": "__SACTIVE__ 3 0"
+   }
+  },
+  "用三句话解释什么是光合作用": {
+   "text": "光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生在植物细胞的叶绿体中，叶绿素是捕获光能的关键色素。\n\n简单来说，光合作用就是植物\"吃光\"制造食物、为地球提供氧气",
+   "sha": "bfc252f2e0af8b85",
+   "ntok": 64,
+   "wall": 4.52,
+   "fp": "★ GEN 64 tok ids=c88842f50f6c88b6 bytes=e471681caee48c05 prompt=53a03e5c3c294bf8(18 tok)",
+   "reused": 0,
+   "new": 18,
+   "ptok": 18,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 4 queued ptok=18 maxtok=64 solo=0 sid=845b86d54c4cf7c0",
+    "pref": "__SPREF__ 4 reused=0 new=18 prefill_s=0.675 lcp=0 ptok=18",
+    "reused": 0,
+    "new": 18,
+    "prefill_s": 0.675,
+    "lcp": 0,
+    "active": "__SACTIVE__ 4 0"
+   }
+  },
+  "把“今天天气不错，我们出去走走吧”翻译成英文": {
+   "text": "# 翻译\n\n**\"The weather is nice today, let's go out for a walk.\"**\n\n## 其他表达方式\n\n**更自然的口语说法：**\n- \"It's a nice day out, let's go for a walk!\"\n- \"The weather's so nice today, why don't we",
+   "sha": "5cd4c2c3600aa47e",
+   "ntok": 64,
+   "wall": 4.5,
+   "fp": "★ GEN 64 tok ids=08dd52652d103b88 bytes=581f1862e92e39f3 prompt=6414dcee3c5571af(25 tok)",
+   "reused": 0,
+   "new": 25,
+   "ptok": 25,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 5 queued ptok=25 maxtok=64 solo=0 sid=7f82f2c8ecc32aef",
+    "pref": "__SPREF__ 5 reused=0 new=25 prefill_s=0.815 lcp=0 ptok=25",
+    "reused": 0,
+    "new": 25,
+    "prefill_s": 0.815,
+    "lcp": 0,
+    "active": "__SACTIVE__ 5 0"
+   }
+  },
+  "写一个Python函数输入整数列表返回最大值索引(只给代码)": {
+   "text": "```python\ndef max_index(nums):\n    return nums.index(max(nums))\n```\n\n**说明：**\n- `max(nums)` 找到列表中的最大值\n- `.index()` 返回该最大值第一次出现的索引位置\n\n**示例：**\n```python\nprint(max_index([3, 7,",
+   "sha": "7bfa9d3ba3ec3045",
+   "ntok": 64,
+   "wall": 4.72,
+   "fp": "★ GEN 64 tok ids=67b86f2fb8eab449 bytes=065a609ed716efcf prompt=ceeea181a6b7f7bb(32 tok)",
+   "reused": 0,
+   "new": 32,
+   "ptok": 32,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 6 queued ptok=32 maxtok=64 solo=0 sid=1ed5f492b9261ae7",
+    "pref": "__SPREF__ 6 reused=0 new=32 prefill_s=0.963 lcp=0 ptok=32",
+    "reused": 0,
+    "new": 32,
+    "prefill_s": 0.963,
+    "lcp": 0,
+    "active": "__SACTIVE__ 6 0"
+   }
+  },
+  "我明天要交一份季度税务报告，列5条检查清单": {
+   "text": "# 季度税务报告检查清单\n\n以下是5条关键的检查清单，帮助你确保季度税务报告准确无误：\n\n## 1. 收入数据核对\n- 核对所有收入来源是否完整记录\n- 确认收入金额与银行流水、发票记录一致\n- 检查是否有遗漏的季度收入",
+   "sha": "05c303f9e7337801",
+   "ntok": 64,
+   "wall": 4.52,
+   "fp": "★ GEN 64 tok ids=b0b2986b391e2032 bytes=1fccd86823413058 prompt=61ca91d167bde5ef(26 tok)",
+   "reused": 0,
+   "new": 26,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 7 queued ptok=26 maxtok=64 solo=0 sid=ae149d8602c97037",
+    "pref": "__SPREF__ 7 reused=0 new=26 prefill_s=0.835 lcp=0 ptok=26",
+    "reused": 0,
+    "new": 26,
+    "prefill_s": 0.835,
+    "lcp": 0,
+    "active": "__SACTIVE__ 7 0"
+   }
+  }
+ },
+ "B": [
+  {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "sha": "bb3f31771d2996de",
+   "ntok": 9,
+   "wall": 3.87,
+   "fp": "★ GEN 9 tok ids=c0fd17ebd3dc35a6 bytes=316cbcaccf26db84 prompt=5406daa979cd4e5b(13 tok)",
+   "reused": 0,
+   "new": 13,
+   "ptok": 25,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 8 queued ptok=13 maxtok=64 solo=0 sid=440ee0853ad1e99f",
+    "pref": "__SPREF__ 8 reused=0 new=13 prefill_s=0.756 lcp=0 ptok=13",
+    "reused": 0,
+    "new": 13,
+    "prefill_s": 0.756,
+    "lcp": 0,
+    "active": "__SACTIVE__ 8 0"
+   }
+  },
+  {
+   "text": "1+1 等于 **2**。\n\n这是一个最基本的数学运算，把 1 和 1 相加，结果就是 2。😊\n\n如果你有其他数学问题，或者想了解更复杂的计算，随时可以问我！",
+   "sha": "ac3130908db72c36",
+   "ntok": 46,
+   "wall": 9.35,
+   "fp": "★ GEN 46 tok ids=2c1abcdf51c55d5b bytes=bce591b7771cc5f4 prompt=4ff5e7c44b1133d6(17 tok)",
+   "reused": 0,
+   "new": 17,
+   "ptok": 32,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 9 queued ptok=17 maxtok=64 solo=0 sid=304ed16a6a7497e6",
+    "pref": "__SPREF__ 9 reused=0 new=17 prefill_s=0.603 lcp=0 ptok=17",
+    "reused": 0,
+    "new": 17,
+    "prefill_s": 0.603,
+    "lcp": 0,
+    "active": "__SACTIVE__ 9 1"
+   }
+  },
+  {
+   "text": "光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生在植物细胞的叶绿体中，需要阳光作为能量来源。\n\n简单来说，光合作用是地球上生命的基础，它不仅为植物自身提供能量，还为整个生态系统中的",
+   "sha": "956e30402bedae21",
+   "ntok": 64,
+   "wall": 12.21,
+   "fp": "★ GEN 64 tok ids=940ed49bea63a3ad bytes=13461a70bbdf6f07 prompt=53a03e5c3c294bf8(18 tok)",
+   "reused": 0,
+   "new": 18,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 10 queued ptok=18 maxtok=64 solo=0 sid=845b86d54c4cf7c0",
+    "pref": "__SPREF__ 10 reused=0 new=18 prefill_s=0.631 lcp=0 ptok=18",
+    "reused": 0,
+    "new": 18,
+    "prefill_s": 0.631,
+    "lcp": 0,
+    "active": "__SACTIVE__ 10 2"
+   }
+  },
+  {
+   "text": "# 翻译\n\n**\"The weather is nice today, let's go out for a walk.\"**\n\n## 其他表达方式\n\n1. **\"It's a nice day out, let's go for a walk.\"**\n   （更口语化，\"day out\"表示适合外出的一天）\n\n2.",
+   "sha": "bcb9bbd057d7c861",
+   "ntok": 64,
+   "wall": 12.21,
+   "fp": "★ GEN 64 tok ids=2ca43ece4acd1697 bytes=e893b656d306575a prompt=6414dcee3c5571af(25 tok)",
+   "reused": 0,
+   "new": 25,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 11 queued ptok=25 maxtok=64 solo=0 sid=7f82f2c8ecc32aef",
+    "pref": "__SPREF__ 11 reused=0 new=25 prefill_s=0.876 lcp=0 ptok=25",
+    "reused": 0,
+    "new": 25,
+    "prefill_s": 0.876,
+    "lcp": 0,
+    "active": "__SACTIVE__ 11 3"
+   }
+  },
+  {
+   "text": "```python\ndef max_index(nums):\n    return nums.index(max(nums))\n```\n\n**说明：**\n- `max(nums)` 找到列表中的最大值\n- `.index()` 返回该最大值第一次出现的索引位置\n\n**示例：**\n```python\nprint(max_index([3, 7,",
+   "sha": "7bfa9d3ba3ec3045",
+   "ntok": 64,
+   "wall": 12.87,
+   "fp": "★ GEN 64 tok ids=67b86f2fb8eab449 bytes=065a609ed716efcf prompt=ceeea181a6b7f7bb(32 tok)",
+   "reused": 0,
+   "new": 32,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 12 queued ptok=32 maxtok=64 solo=0 sid=1ed5f492b9261ae7",
+    "pref": "__SPREF__ 12 reused=0 new=32 prefill_s=0.908 lcp=0 ptok=32",
+    "reused": 0,
+    "new": 32,
+    "prefill_s": 0.908,
+    "lcp": 0,
+    "active": "__SACTIVE__ 12 0"
+   }
+  },
+  {
+   "text": "# 季度税务报告检查清单\n\n以下是5条关键检查项，帮助你确保报告准确完整：\n\n## 1. 收入数据核对\n- 确认所有季度内收入已正确记录\n- 检查发票、收据等原始凭证是否齐全\n- 验证收入分类是否正确（应税/非",
+   "sha": "a3dd86cbf9ed1fb8",
+   "ntok": 64,
+   "wall": 15.2,
+   "fp": "★ GEN 64 tok ids=54bc6d587d673afb bytes=0a160ab4409deca9 prompt=61ca91d167bde5ef(26 tok)",
+   "reused": 0,
+   "new": 26,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 13 queued ptok=26 maxtok=64 solo=0 sid=ae149d8602c97037",
+    "pref": "__SPREF__ 13 reused=0 new=26 prefill_s=0.809 lcp=0 ptok=26",
+    "reused": 0,
+    "new": 26,
+    "prefill_s": 0.809,
+    "lcp": 0,
+    "active": "__SACTIVE__ 13 1"
+   }
+  }
+ ],
+ "C": [
+  {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "sha": "bb3f31771d2996de",
+   "ntok": 9,
+   "wall": 3.99,
+   "fp": "★ GEN 9 tok ids=c0fd17ebd3dc35a6 bytes=316cbcaccf26db84 prompt=5406daa979cd4e5b(13 tok)",
+   "reused": 0,
+   "new": 13,
+   "ptok": 17,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 15 queued ptok=13 maxtok=64 solo=0 sid=440ee0853ad1e99f",
+    "pref": "__SPREF__ 15 reused=0 new=13 prefill_s=0.746 lcp=0 ptok=13",
+    "reused": 0,
+    "new": 13,
+    "prefill_s": 0.746,
+    "lcp": 0,
+    "active": "__SACTIVE__ 15 1"
+   }
+  },
+  {
+   "text": "1+1 等于 **2**。\n\n这是一个最基本的加法运算，把 1 和 1 加起来，结果就是 2。😊",
+   "sha": "c11726376e6a6c2f",
+   "ntok": 30,
+   "wall": 6.0,
+   "fp": "★ GEN 30 tok ids=695da5b1f4577857 bytes=addc9102fae61a7c prompt=4ff5e7c44b1133d6(17 tok)",
+   "reused": 0,
+   "new": 17,
+   "ptok": 17,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 17 queued ptok=17 maxtok=64 solo=0 sid=304ed16a6a7497e6",
+    "pref": "__SPREF__ 17 reused=0 new=17 prefill_s=0.608 lcp=0 ptok=17",
+    "reused": 0,
+    "new": 17,
+    "prefill_s": 0.608,
+    "lcp": 0,
+    "active": "__SACTIVE__ 17 3"
+   }
+  },
+  {
+   "text": "光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生在植物细胞的叶绿体中，需要叶绿素等色素来捕获光能。\n\n简单来说，光合作用就是植物\"吃光\"制造食物、同时为地球",
+   "sha": "89160929271b429d",
+   "ntok": 64,
+   "wall": 8.58,
+   "fp": "★ GEN 64 tok ids=9a7fdcd4a1493c80 bytes=3ab9b58cad3b688b prompt=53a03e5c3c294bf8(18 tok)",
+   "reused": 0,
+   "new": 18,
+   "ptok": 17,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 14 queued ptok=18 maxtok=64 solo=0 sid=845b86d54c4cf7c0",
+    "pref": "__SPREF__ 14 reused=0 new=18 prefill_s=0.653 lcp=0 ptok=18",
+    "reused": 0,
+    "new": 18,
+    "prefill_s": 0.653,
+    "lcp": 0,
+    "active": "__SACTIVE__ 14 0"
+   }
+  },
+  {
+   "text": "# 翻译\n\n**\"The weather is nice today, let's go out for a walk.\"**\n\n## 其他表达方式\n\n**更自然的说法：**\n- \"It's a nice day out, let's go for a walk.\"\n- \"The weather's so nice today, why don't we go",
+   "sha": "96cdb8a7908893bd",
+   "ntok": 64,
+   "wall": 8.66,
+   "fp": "★ GEN 64 tok ids=63cc411ea35a6d9d bytes=de26d05d3c8d5ea1 prompt=6414dcee3c5571af(25 tok)",
+   "reused": 0,
+   "new": 25,
+   "ptok": 17,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 16 queued ptok=25 maxtok=64 solo=0 sid=7f82f2c8ecc32aef",
+    "pref": "__SPREF__ 16 reused=0 new=25 prefill_s=0.894 lcp=0 ptok=25",
+    "reused": 0,
+    "new": 25,
+    "prefill_s": 0.894,
+    "lcp": 0,
+    "active": "__SACTIVE__ 16 2"
+   }
+  }
+ ],
+ "D": [
+  {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "sha": "bb3f31771d2996de",
+   "ntok": 9,
+   "wall": 4.06,
+   "fp": "★ GEN 9 tok ids=c0fd17ebd3dc35a6 bytes=316cbcaccf26db84 prompt=5406daa979cd4e5b(13 tok)",
+   "reused": 0,
+   "new": 13,
+   "ptok": 25,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 19 queued ptok=13 maxtok=64 solo=0 sid=440ee0853ad1e99f",
+    "pref": "__SPREF__ 19 reused=0 new=13 prefill_s=0.715 lcp=0 ptok=13",
+    "reused": 0,
+    "new": 13,
+    "prefill_s": 0.715,
+    "lcp": 0,
+    "active": "__SACTIVE__ 19 1"
+   }
+  },
+  {
+   "text": "1+1 等于 **2**。\n\n这是一个最基本的加法运算：\n- 1 加 1，就是把两个 1 合在一起\n- 结果就是 2\n\n如果你有其他数学问题，或者想了解更复杂的计算，都可以告诉我！😊",
+   "sha": "53590afd26f10434",
+   "ntok": 53,
+   "wall": 10.06,
+   "fp": "★ GEN 53 tok ids=d747a9996e4c951f bytes=a90ea225bd59080e prompt=4ff5e7c44b1133d6(17 tok)",
+   "reused": 0,
+   "new": 17,
+   "ptok": 32,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 20 queued ptok=17 maxtok=64 solo=0 sid=304ed16a6a7497e6",
+    "pref": "__SPREF__ 20 reused=0 new=17 prefill_s=0.611 lcp=0 ptok=17",
+    "reused": 0,
+    "new": 17,
+    "prefill_s": 0.611,
+    "lcp": 0,
+    "active": "__SACTIVE__ 20 2"
+   }
+  },
+  {
+   "text": "光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生在植物细胞的叶绿体中，需要阳光作为能量来源。\n\n简单来说，光合作用就是植物\"吃光\"制造食物的方式，它不仅为植物自身提供能量",
+   "sha": "0312b9f39b59011c",
+   "ntok": 64,
+   "wall": 11.96,
+   "fp": "★ GEN 64 tok ids=6028f279b3979d75 bytes=71a35a972c26af51 prompt=53a03e5c3c294bf8(18 tok)",
+   "reused": 0,
+   "new": 18,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 18 queued ptok=18 maxtok=64 solo=0 sid=845b86d54c4cf7c0",
+    "pref": "__SPREF__ 18 reused=0 new=18 prefill_s=0.665 lcp=18 ptok=18",
+    "reused": 0,
+    "new": 18,
+    "prefill_s": 0.665,
+    "lcp": 18,
+    "active": "__SACTIVE__ 18 0"
+   }
+  },
+  {
+   "text": "# 翻译\n\n**\"The weather is nice today, let's go out for a walk.\"**\n\n## 其他表达方式\n\n**更自然的口语说法：**\n- \"It's a nice day out, let's go for a walk.\"\n- \"The weather's so nice today, why don't we",
+   "sha": "cd514265e199f48d",
+   "ntok": 64,
+   "wall": 12.09,
+   "fp": "★ GEN 64 tok ids=2a618014078f2dd1 bytes=7168b216a6915a42 prompt=6414dcee3c5571af(25 tok)",
+   "reused": 0,
+   "new": 25,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 21 queued ptok=25 maxtok=64 solo=0 sid=7f82f2c8ecc32aef",
+    "pref": "__SPREF__ 21 reused=0 new=25 prefill_s=0.823 lcp=0 ptok=25",
+    "reused": 0,
+    "new": 25,
+    "prefill_s": 0.823,
+    "lcp": 0,
+    "active": "__SACTIVE__ 21 3"
+   }
+  },
+  {
+   "text": "```python\ndef max_index(nums):\n    return nums.index(max(nums))\n```\n\n如果列表可能为空，建议加上判断：\n\n```python\ndef max_index(nums):\n    if not nums:\n        raise ValueError(\"列表不能为空\")\n    return nums.index(max(nums))\n```\n\n**",
+   "sha": "203f7bfee7aa96cd",
+   "ntok": 64,
+   "wall": 12.8,
+   "fp": "★ GEN 64 tok ids=096b1d19dfd8e086 bytes=f808e31c76e2558e prompt=ceeea181a6b7f7bb(32 tok)",
+   "reused": 0,
+   "new": 32,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 22 queued ptok=32 maxtok=64 solo=0 sid=1ed5f492b9261ae7",
+    "pref": "__SPREF__ 22 reused=0 new=32 prefill_s=0.939 lcp=0 ptok=32",
+    "reused": 0,
+    "new": 32,
+    "prefill_s": 0.939,
+    "lcp": 0,
+    "active": "__SACTIVE__ 22 1"
+   }
+  },
+  {
+   "text": "# 季度税务报告检查清单\n\n以下是5条关键检查项，帮助你确保报告准确无误：\n\n## 1. 收入与发票核对\n- 确认所有季度内收到的款项均已入账\n- 核对发票编号连续、无遗漏\n- 检查是否有重复记账或漏记项目",
+   "sha": "2542b0d1097fefba",
+   "ntok": 64,
+   "wall": 15.54,
+   "fp": "★ GEN 64 tok ids=8aa3659042abd845 bytes=10d4993ee19ff134 prompt=61ca91d167bde5ef(26 tok)",
+   "reused": 0,
+   "new": 26,
+   "ptok": 26,
+   "solo": 0,
+   "cb": {
+    "add": "__SADD__ 23 queued ptok=26 maxtok=64 solo=0 sid=ae149d8602c97037",
+    "pref": "__SPREF__ 23 reused=0 new=26 prefill_s=0.828 lcp=0 ptok=26",
+    "reused": 0,
+    "new": 26,
+    "prefill_s": 0.828,
+    "lcp": 0,
+    "active": "__SACTIVE__ 23 2"
+   }
+  }
+ ],
+ "fails": [
+  "B2 回答不同: 单独='1+1 等于 **2**。\\n\\n这是一个最基本的加法运算：\\n- 1 + 1 = 2\\n\\n如果你有其他数学问题，我很乐意帮你解' 并发='1+1 等于 **2**。\\n\\n这是一个最基本的数学运算，把 1 和 1 相加，结果就是 2。😊\\n\\n如果你有其他数学问题，'",
+  "B2 指纹不同: ★ GEN 36 tok ids=d4b3e3dadd2dbe69 bytes=ed8708791cf71980 prompt=4ff5e7c44b1133d6(17 tok) vs ★ GEN 46 tok ids=2c1abcdf51c55d5b bytes=bce591b7771cc5f4 prompt=4ff5e7c44b1133d6(17 tok)",
+  "B3 回答不同: 单独='光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\\n\\n这个过程主要发生' 并发='光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\\n\\n这个过程主要发生'",
+  "B3 指纹不同: ★ GEN 64 tok ids=c88842f50f6c88b6 bytes=e471681caee48c05 prompt=53a03e5c3c294bf8(18 tok) vs ★ GEN 64 tok ids=940ed49bea63a3ad bytes=13461a70bbdf6f07 prompt=53a03e5c3c294bf8(18 tok)",
+  "B4 回答不同: 单独='# 翻译\\n\\n**\"The weather is nice today, let\\'s go out for a walk.' 并发='# 翻译\\n\\n**\"The weather is nice today, let\\'s go out for a walk.'",
+  "B4 指纹不同: ★ GEN 64 tok ids=08dd52652d103b88 bytes=581f1862e92e39f3 prompt=6414dcee3c5571af(25 tok) vs ★ GEN 64 tok ids=2ca43ece4acd1697 bytes=e893b656d306575a prompt=6414dcee3c5571af(25 tok)",
+  "B6 回答不同: 单独='# 季度税务报告检查清单\\n\\n以下是5条关键的检查清单，帮助你确保季度税务报告准确无误：\\n\\n## 1. 收入数据核对\\n- ' 并发='# 季度税务报告检查清单\\n\\n以下是5条关键检查项，帮助你确保报告准确完整：\\n\\n## 1. 收入数据核对\\n- 确认所有季度'",
+  "B6 指纹不同: ★ GEN 64 tok ids=b0b2986b391e2032 bytes=1fccd86823413058 prompt=61ca91d167bde5ef(26 tok) vs ★ GEN 64 tok ids=54bc6d587d673afb bytes=0a160ab4409deca9 prompt=61ca91d167bde5ef(26 tok)",
+  "C2 回答不同",
+  "C3 回答不同",
+  "C4 回答不同",
+  "D2 回答不同 (排队路径)",
+  "D3 回答不同 (排队路径)",
+  "D4 回答不同 (排队路径)",
+  "D5 回答不同 (排队路径)",
+  "D6 回答不同 (排队路径)"
+ ],
+ "bwall": 15.2066490650177,
+ "cwall": 8.65677261352539,
+ "dwall": 15.543216228485107
+}

@@ -1,0 +1,183 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// ============================================================================
+// K200 原生 K-quant GEMV v3 (kqk3): LM 安全窗口版
+//   v1 慢因: 每个 (行×super-block) 3 次 GM2LM (激活/scale/权重), ~30us/次
+//   v3: 激活按 16 super-block (4096) 窗口化, 每行每段权重只读一次
+//   GM2LM 次数 (grp_ffn 24576x4096, 每core 192行): 5 + 192*4 ≈ 773 (v1: 9216) => 12x
+//   LM: lx 4096 + lxs 512 + lb 512 + lw 3360 + lacc 512 ≈ 8.3KB (v2 的 22KB 超限)
+//   数学与 v1 完全一致 (已验证: Q4_K 相对误差 ~1e-16, Q6_K 单点精确)
+// ============================================================================
+#define QKK_RB  128
+#define HW_CORE 16
+#define KQK_TID (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define KQK_NT  (cluster_num() * HW_CORE)
+
+#define QKK_D(p) ({ unsigned short hh__ = *(const unsigned short *)(p); \
+    unsigned s__ = (unsigned)(hh__ & 0x8000) << 16; \
+    int e__ = (hh__ >> 10) & 0x1f; unsigned m__ = hh__ & 0x3ff, u__; \
+    if (e__ == 0) { if (!m__) u__ = s__; else { int sh__ = 0; while (!(m__ & 0x400)) { m__ <<= 1; sh__++; } m__ &= 0x3ff; \
+                   u__ = s__ | ((unsigned)(127 - 15 - sh__) << 23) | (m__ << 13); } } \
+    else if (e__ == 31) u__ = s__ | 0x7f800000u | (m__ << 13); \
+    else u__ = s__ | ((unsigned)(e__ - 15 + 127) << 23) | (m__ << 13); \
+    float f__; __builtin_memcpy(&f__, &u__, 4); f__; })
+
+#define QKK_GSM(j, q, pd, pm) do { \
+    if ((j) < 4) { *(pd) = (q)[j] & 63;            *(pm) = (q)[(j) + 4] & 63; } \
+    else { *(pd) = ((q)[(j)+4] & 0xF) | (((q)[(j)-4] >> 6) << 4); \
+           *(pm) = ((q)[(j)+4] >>  4) | (((q)[(j)  ] >> 6) << 4); } } while (0)
+
+#define QK3_SB 8   // 窗口: 16 super-block = 4096 激活, 每段权重 ≤3360B
+
+// ---------------- Q4_K ----------------
+__global__ void gemv_q4k3_i8_k(const unsigned char *W, const unsigned char *xq,
+                              const float *xs, float *y, int M, int N) {
+    int tid = KQK_TID, nthr = KQK_NT;
+    __local__ signed char   lx[QK3_SB * 256];
+    __local__ float         lxs[QK3_SB * 8];
+    __local__ int           lb[QK3_SB * 8];
+    __local__ unsigned char lw[QK3_SB * 144];
+    __local__ float         lacc[QKK_RB];
+    int nb = N / 256;
+    if (nb <= 0) return;
+    long rowstride = (long)nb * 144;
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per; if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int nseg = (nb + QK3_SB - 1) / QK3_SB;
+    for (int mb = m0; mb < m1; mb += QKK_RB) {
+        int me = mb + QKK_RB; if (me > m1) me = m1;
+        int nrow = me - mb;
+        for (int i = 0; i < nrow; i++) lacc[i] = 0.f;
+        for (int sg = 0; sg < nseg; sg++) {
+            int sb0 = sg * QK3_SB;
+            int sbn = nb - sb0; if (sbn > QK3_SB) sbn = QK3_SB;
+            for (int c = 0; c < sbn * 256; c += 256) {          // 激活段
+                int cc = sbn * 256 - c; if (cc > 256) cc = 256;
+                GM2LM(xq + sb0 * 256 + c, (unsigned char *)lx + c, cc);
+            }
+            for (int c = 0; c < sbn * 8; c += 64) {              // 激活 scale 段
+                int cc = sbn * 8 - c; if (cc > 64) cc = 64;
+                GM2LM(xs + sb0 * 8 + c, lxs + c, cc * 4);
+            }
+            for (int g = 0; g < sbn * 8; g++) {                  // Σxq 段 (行无关)
+                int s = 0;
+                for (int i = 0; i < 32; i++) s += (int)lx[g * 32 + i];
+                lb[g] = s;
+            }
+            for (int m = mb; m < me; m++) {
+                for (int c = 0; c < sbn * 144; c += 256) {      // 权重行段
+                    int cc = sbn * 144 - c; if (cc > 256) cc = 256;
+                    GM2LM(W + (long)m * rowstride + (long)sb0 * 144 + c, lw + c, cc);
+                }
+                const unsigned char *sc = lw + 4;
+                const unsigned char *qs = lw + 16;
+                float a = lacc[m - mb];
+                for (int jb = 0; jb < sbn; jb++) {
+                    float d  = QKK_D(lw + (long)jb * 144 + 0);
+                    float dm = QKK_D(lw + (long)jb * 144 + 2);
+                    for (int jg = 0; jg < 4; jg++) {
+                        int is = 2 * jg, s1, mm1, s2, mm2;
+                        const unsigned char *scb = sc + (long)jb * 12;
+                        QKK_GSM(is, scb, &s1, &mm1);
+                        QKK_GSM(is + 1, scb, &s2, &mm2);
+                        const unsigned char *q = qs + (long)jb * 128 + jg * 32;
+                        int A1 = 0, A2 = 0;
+                        for (int i = 0; i < 32; i++) {
+                            A1 += (int)(q[i] & 0x0F) * (int)lx[jb * 256 + jg * 64 + i];
+                            A2 += (int)(q[i] >> 4)   * (int)lx[jb * 256 + jg * 64 + 32 + i];
+                        }
+                        a += d * (float)s1 * lxs[jb * 8 + is]     * (float)A1
+                           - dm * (float)mm1 * lxs[jb * 8 + is]   * (float)lb[jb * 8 + is]
+                           + d * (float)s2 * lxs[jb * 8 + is + 1] * (float)A2
+                           - dm * (float)mm2 * lxs[jb * 8 + is+1] * (float)lb[jb * 8 + is + 1];
+                    }
+                }
+                lacc[m - mb] = a;
+            }
+        }
+        LM2GM(lacc, y + mb, nrow * 4);
+    }
+}
+
+// ---------------- Q6_K ----------------
+__global__ void gemv_q6k3_i8_k(const unsigned char *W, const unsigned char *xq,
+                              const float *xs, float *y, int M, int N) {
+    int tid = KQK_TID, nthr = KQK_NT;
+    __local__ signed char   lx[QK3_SB * 256];
+    __local__ float         lxs[QK3_SB * 8];
+    __local__ unsigned char lw[QK3_SB * 210];
+    __local__ float         lacc[QKK_RB];
+    int nb = N / 256;
+    if (nb <= 0) return;
+    long rowstride = (long)nb * 210;
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per; if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int nseg = (nb + QK3_SB - 1) / QK3_SB;
+    for (int mb = m0; mb < m1; mb += QKK_RB) {
+        int me = mb + QKK_RB; if (me > m1) me = m1;
+        int nrow = me - mb;
+        for (int i = 0; i < nrow; i++) lacc[i] = 0.f;
+        for (int sg = 0; sg < nseg; sg++) {
+            int sb0 = sg * QK3_SB;
+            int sbn = nb - sb0; if (sbn > QK3_SB) sbn = QK3_SB;
+            for (int c = 0; c < sbn * 256; c += 256) {
+                int cc = sbn * 256 - c; if (cc > 256) cc = 256;
+                GM2LM(xq + sb0 * 256 + c, (unsigned char *)lx + c, cc);
+            }
+            for (int c = 0; c < sbn * 8; c += 64) {
+                int cc = sbn * 8 - c; if (cc > 64) cc = 64;
+                GM2LM(xs + sb0 * 8 + c, lxs + c, cc * 4);
+            }
+            for (int m = mb; m < me; m++) {
+                for (int c = 0; c < sbn * 210; c += 256) {
+                    int cc = sbn * 210 - c; if (cc > 256) cc = 256;
+                    GM2LM(W + (long)m * rowstride + (long)sb0 * 210 + c, lw + c, cc);
+                }
+                float a = lacc[m - mb];
+                for (int jb = 0; jb < sbn; jb++) {
+                    float d = QKK_D(lw + (long)jb * 210 + 208);
+                    const unsigned char *ql = lw + (long)jb * 210;
+                    const unsigned char *qh = ql + 128;
+                    const signed char   *sc = (const signed char *)(ql + 192);
+                    float aa = 0.f;
+                    for (int half = 0; half < 2; half++) {
+                        const unsigned char *qlh = ql + half * 64;
+                        const unsigned char *qhh = qh + half * 32;
+                        const signed char   *hp  = lx + jb * 256 + half * 128;
+                        float s0 = lxs[jb * 8 + half * 4 + 0], s1 = lxs[jb * 8 + half * 4 + 1];
+                        float s2 = lxs[jb * 8 + half * 4 + 2], s3 = lxs[jb * 8 + half * 4 + 3];
+                        for (int l = 0; l < 32; l++) {
+                            int is = l >> 4;
+                            int q1 = (int)((qlh[l]      & 0x0F) | (((qhh[l] >> 0) & 3) << 4)) - 32;
+                            int q2 = (int)((qlh[l + 32] & 0x0F) | (((qhh[l] >> 2) & 3) << 4)) - 32;
+                            int q3 = (int)((qlh[l]      >>  4) | (((qhh[l] >> 4) & 3) << 4)) - 32;
+                            int q4 = (int)((qlh[l + 32] >>  4) | (((qhh[l] >> 6) & 3) << 4)) - 32;
+                            aa += (float)q1 * (float)hp[l]      * (float)sc[is + 0] * s0
+                                + (float)q2 * (float)hp[l + 32] * (float)sc[is + 2] * s1
+                                + (float)q3 * (float)hp[l + 64] * (float)sc[is + 4] * s2
+                                + (float)q4 * (float)hp[l + 96] * (float)sc[is + 6] * s3;
+                        }
+                    }
+                    a += aa * d;
+                }
+                lacc[m - mb] = a;
+            }
+        }
+        LM2GM(lacc, y + mb, nrow * 4);
+    }
+}
+
+void run_gemv_q4k2(int cl, int co, const void *W, const void *xq, const void *xs,
+                  void *y, int M, int N) {
+    gemv_q4k3_i8_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)xq,
+                               (const float *)xs, (float *)y, M, N);
+}
+void run_gemv_q6k2(int cl, int co, const void *W, const void *xq, const void *xs,
+                  void *y, int M, int N) {
+    gemv_q6k3_i8_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)xq,
+                               (const float *)xs, (float *)y, M, N);
+}

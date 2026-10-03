@@ -1,0 +1,873 @@
+#!/usr/bin/env python3
+# =============================================================================
+# serve.py —— 8090 单端口 OpenAI 兼容服务, 后端 = 已验证正确的 orn 引擎 (Q8_0 双芯)
+#
+# 设计要点 (为什么这么写):
+#   1) 后端用【已经离线验证过输出正确】的二进制, 内核 = kq8 + HW_CORE=16 + co<=16。
+#      不做任何性能花样 —— 现在唯一目标是"能出正确的话"。
+#   2) 引擎的 stdin 走【FIFO】而不是 Popen(stdin=PIPE): 实测经 safe_run 后子进程的
+#      fd0 会立刻 EOF(探明前先用最稳的写法绕开), FIFO + O_RDWR 常开则永不 EOF。
+#   3) 引擎整个跑在 safe_run.sh 安全网下: 卡上一出异常就被立即 SIGKILL, 服务判 FAILED,
+#      【绝不自动重启/重试】, 也绝不 soft_reset。
+#   4) 强制关思考: assistant 回合里直接写死空 <think></think> 块(与 CPU 基准 --reasoning off 等价)。
+#
+# ★ 命名约定 (与 ornc/start.sh / stop.sh / restart.sh / status.sh 对齐, 不许再各叫各的):
+#     本文件 = 服务进程名 (serve2.py); 引擎二进制 = /home/caden/orn_engine/orn3。
+#     改任一名字都必须同步改 stop.sh 的 PAT_* —— 否则会「停不掉」, 把带病引擎留在卡上。
+#
+# =============================================================================
+# ★ 第24轮 (2026-09-22) 稳定性修复 —— 「引擎周期性自我死亡 => 8090 变 engine:dead =>
+#   中转站(New API)探到失败自动禁用渠道 => 用户一直 model_not_found」的根治:
+#
+#   A. 护城河 = EngineSup 看护类 (本轮新增, 不依赖根因):
+#        A1) 引擎进程一退出(rc=134/137/1/0 都一样) => 【立即】自动重启, 不等 cron/svc_guard;
+#        A2) 重启期间 ready=False, 请求走 _wait_ready【排队等待】, 绝不再回 503
+#            (原 WAITREADY 只盖"灌权重 74s"; 现在连"引擎死了正在拉回来"这一段也盖住);
+#        A3) 每次死亡=>重启 都写 /home/caden/ornc/serve2.log, 并在 /health 暴露
+#            engine_restarts / engine_gen / engine_deaths / last_death / card_exception;
+#        A4) 起新引擎前【先等旧进程组与持卡进程真死】(防双实例抢卡), 且两芯 state
+#            必须 RUNNING; 若卡不是 RUNNING 一律【不重启】=> 永久 dead, 交人工。
+#            这是安全红线: 卡异常绝不自动重试 (与 safe_run 的纪律一致)。
+#   B. 队列同步修复: 客户端中途断开(EPIPE/ECONNRESET)时, 引擎本次输出必须读到 __END__,
+#      否则残留在队列里的 token 会串到下一条请求 (队列错位), 后一条请求会读到上一条的尾巴。
+#   C. 取证能力: (C1) 启动链加 ulimit -c unlimited; (C2) LD_PRELOAD crashbt.so 在崩溃
+#      瞬间把 PC/栈帧写 /home/caden/ornc/orn3_crash.log。
+#      为什么必须这么绕: /proc/sys/kernel/core_pattern 是 root 的 apport 管道(caden 无 sudo),
+#      而 apport 实测对非发行版包的可执行文件只在 core limit 非 0 时才写盘,
+#      且本机没有 gdb / eu-stack / lldb —— 所以回溯做进进程自己。
+#
+#   ★ 不改动任何算式/数值路径: 只加看护、日志、信号处理器、队列排空逻辑。
+# =============================================================================
+import os, sys, json, base64, time, threading, subprocess, http.server, socketserver, queue, errno, hashlib, re, signal
+
+HERE     = os.path.dirname(os.path.abspath(__file__))
+ENG      = os.environ.get("K200_ENGINE", "/home/caden/orn_engine/orn")
+MODEL    = os.environ.get("K200_MODEL_PATH", "/home/caden/orn/Ornith-1.5-9B-Q8_0.gguf")
+PORT     = int(os.environ.get("K200_PORT", "8090"))
+NGEN     = os.environ.get("K200_NGEN", "64")
+MODEL_ID = os.environ.get("K200_MODEL", "ornith-1.5-9b-k200")
+SAFEBIN  = os.environ.get("K200_SAFEBIN", "/home/caden/orn_engine/safe_run.sh")
+SAFEMAX  = os.environ.get("K200_SAFEMAXSEC", "14400")
+LDP      = "/usr/local/xpu-4.33.0/lib64:/home/caden/xtdk/xtdk-x86_64/shlib"
+FIFO     = os.environ.get("K200_FIFO", "/tmp/ornq_in.fifo")
+TMPL     = os.environ.get("K200_TMPL_IN",
+    "<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+SEP      = os.environ.get("K200_TMPL_SEP", "<|im_end|>\n<|im_start|>")
+RAWTOK   = bool(int(os.environ.get("K200_RAWTOK", "0")))
+RAWLOG   = os.environ.get("K200_RAWLOG", "/home/caden/ornc/raw_tok.log")
+# ★ 视觉塔调档变量: 由 serve2 显式塞进引擎子进程 env (K200_VIS_* 可覆盖; 默认值即交付档)
+VIS_CH   = os.environ.get("K200_VIS_CH", "96")
+VIS_CHA  = os.environ.get("K200_VIS_CHA", "0")
+VIS_FOLD = os.environ.get("K200_VIS_FOLD", "1")
+# ★ 第24轮: 崩溃取证 (LD_PRELOAD 垫片 + core)
+CRASHBT  = os.environ.get("K200_CRASHBT", "/home/caden/orn_engine/crashbt.so")
+CRASHLOG = os.environ.get("K200_CRASHBT_LOG", "/home/caden/ornc/orn3_crash.log")
+# ★ 第24轮: 看护节拍/重启预算 (卡死/反复起不来时不要刷屏刷卡)
+WATCH_EVERY   = float(os.environ.get("K200_WATCH_EVERY", "2.0"))
+RESTART_BUDGET= int(os.environ.get("K200_RESTART_BUDGET", "50"))
+
+# ============================================================================
+# ★ VIS_IMAGE_PATCHED: 支持 content 数组里的 {"type":"image_url",...}
+#   流程: 取图 -> 照 llama.cpp mtmd 预处理成平面 f32 -> 发 !VIS 命令给引擎
+#         (引擎在卡上跑视觉塔) -> 拼 <|vision_start|><|image_pad|>*n<|vision_end|> + 文本
+#   ★ 纯文本请求: 下面所有分支都不触发, 与原路径逐字节相同。
+# ============================================================================
+IMGDIR   = os.environ.get("K200_IMGDIR", "/tmp/ornimg")
+MM_MAXPX = 4194304
+MM_MINPX = 8192
+
+def mm_calc_size(W, H):
+    w = max(32, int(round(W / 32.0) * 32)); h = max(32, int(round(H / 32.0) * 32))
+    if h * w > MM_MAXPX:
+        beta = (H * W / float(MM_MAXPX)) ** 0.5
+        h = max(32, int(H / beta) // 32 * 32); w = max(32, int(W / beta) // 32 * 32)
+    elif h * w < MM_MINPX:
+        beta = (float(MM_MINPX) / (H * W)) ** 0.5
+        w = max(32, int((W * beta + 31) // 32 * 32)); h = max(32, int((H * beta + 31) // 32 * 32))
+    return w, h
+
+def prep_image(url):
+    """OpenAI image_url -> (f32路径, W, H); 平面布局 x + W*y + W*H*c, 值=(px/255-0.5)/0.5"""
+    import io as _io, hashlib
+    import numpy as np
+    from PIL import Image
+    if url.startswith("data:"):
+        b = base64.b64decode(url.split(",", 1)[1])
+    elif url.startswith("http://") or url.startswith("https://"):
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=60) as r:
+            b = r.read(64 * 1024 * 1024)
+    else:
+        with open(url, "rb") as f:
+            b = f.read()
+    im = Image.open(_io.BytesIO(b)).convert("RGB")
+    W0, H0 = im.size
+    tw, th = mm_calc_size(W0, H0)
+    if (tw, th) == (W0, H0):
+        v = (np.asarray(im, np.uint8).astype(np.float32) / 255.0 - 0.5) / 0.5
+    else:
+        scale = min(tw / float(W0), th / float(H0))
+        nw, nh = min(tw, int(np.ceil(W0 * scale))), min(th, int(np.ceil(H0 * scale)))
+        r = np.asarray(im.resize((nw, nh), Image.BICUBIC), np.uint8).astype(np.float32)
+        v = np.zeros((th, tw, 3), np.float32)
+        ox, oy = (tw - nw) // 2, (th - nh) // 2
+        v[oy:oy + nh, ox:ox + nw, :] = (r / 255.0 - 0.5) / 0.5
+    os.makedirs(IMGDIR, exist_ok=True)
+    hp = os.path.join(IMGDIR, "img_%s_%dx%d.f32" % (hashlib.sha1(b).hexdigest()[:16], tw, th))
+    np.ascontiguousarray(v.transpose(2, 0, 1)).astype("<f4").tofile(hp)
+    return hp, tw, th
+
+def split_content(c):
+    """content -> (文本, [图像 url])"""
+    if isinstance(c, list):
+        txt, urls = [], []
+        for x in c:
+            if not isinstance(x, dict):
+                txt.append(str(x)); continue
+            if x.get("type") == "image_url":
+                iu = x.get("image_url")
+                urls.append(iu.get("url", "") if isinstance(iu, dict) else str(iu or ""))
+            elif x.get("type") == "text" or "text" in x:
+                txt.append(x.get("text", ""))
+        return " ".join(txt), urls
+    return ("" if c is None else str(c)), []
+
+def log(*a):
+    print("[serve %s]" % time.strftime("%H:%M:%S"), *a, flush=True)
+
+def build_prompt(messages, vision=None):
+    """ChatML + 强制空 think 块, 特殊 token 全部来自 GGUF 推导 (与引擎打印的 id 一致)。
+       vision: 若非空 = 最后一条消息的图像 token 数列表 (图像 embedding 已先进引擎)"""
+    out = []
+    for m in messages[:-1]:
+        c, _u = split_content(m.get("content", ""))
+        role = m.get("role", "user")
+        if role == "assistant":
+            # ★ 历史里的 assistant 回合也要带上强制空 think 块 —— 否则历史与上一轮
+            #   "已吃进引擎状态" 的 token 流在第 10 个 token 处就对不齐, 会话续算永不命中
+            out.append("<|im_start|>assistant\n<think>\n\n</think>\n\n%s<|im_end|>\n" % c)
+        else:
+            out.append("<|im_start|>%s\n%s<|im_end|>\n" % (role, c))
+    last, _u = split_content(messages[-1].get("content", ""))
+    if vision:
+        pre = "".join("<|vision_start|>" + "<|image_pad|>" * int(n) + "<|vision_end|>" for n in vision)
+        last = pre + str(last)
+    out.append(TMPL.replace("{q}", str(last)))
+    return "".join(out)
+
+# ============================================================================
+# ★ 第24轮: 进程/卡状态小工具 (只读, 不碰卡)
+# ============================================================================
+def _proc_cmdline(pid):
+    try:
+        with open("/proc/%s/cmdline" % pid, "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+def _card_states():
+    o = []
+    for d in (0, 1):
+        try:
+            o.append(open("/proc/xpu/dev%d/state" % d).read().strip())
+        except Exception:
+            o.append("MISSING")
+    return tuple(o)
+
+def _card_holders():
+    """谁真的开着 /dev/xpu* (实测 fd, 不靠猜)。与 stop.sh 同口径: 看门狗不持卡。"""
+    out, me = [], os.getpid()
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        pid = int(d)
+        if pid == me:
+            continue
+        cl = _proc_cmdline(pid)
+        if "watchdog.py" in cl:
+            continue
+        fdd = "/proc/%s/fd" % pid
+        try:
+            for f in os.listdir(fdd):
+                try:
+                    if "/dev/xpu" in os.readlink(os.path.join(fdd, f)):
+                        out.append((pid, cl[:70])); break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return out
+
+def _await_card_free(timeout=30.0):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if not _card_holders():
+            return True
+        time.sleep(0.5)
+    return False
+
+def _reap_stragglers():
+    """只杀【引擎本体 / 它那条 safe_run 包装】的残留, 绝不碰 serve2.py 自己。
+       ★ 绝不能按进程组 kill: safe_run 是 serve2 的 Popen 子进程, 与 serve2 同进程组。
+       (safe_run 自己的 EXIT trap 也会 kill -9 目标进程组, 这里只是双保险)"""
+    me, n = os.getpid(), 0
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        pid = int(d)
+        if pid in (me, os.getppid()):
+            continue
+        cl = _proc_cmdline(pid)
+        if not cl or "serve2.py" in cl or "bt_resolve" in cl:
+            continue
+        if ("orn_engine/orn3" in cl or "orn_engine/orn2" in cl
+                or ("safe_run.sh" in cl and "-n orn_serve" in cl)):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                n += 1
+                log("残留清理: kill -9 %d %s" % (pid, cl[:80]))
+            except Exception:
+                pass
+    return n
+
+class Engine:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.dead = False
+        self.reason = ""
+        self.ntok_total = 0
+        self.gen_secs = 0.0
+        self.nreq = 0
+        self.q = queue.Queue()
+        self.ready = False
+        self.prefill_info = ""
+        # ★ 第24轮: 看护需要的字段
+        self.spawn_t = time.time()
+        self.card_exc = False          # safe_run 判定"卡异常" => 永不自动重启
+        self.verdict = ""              # safe_run 的判定原文
+        self.safelines = []            # safe_run 最后若干行(死亡时取证用)
+        self.hang = False              # 只 set, 由上层决定是否重启
+        # 真实 prompt token 数 与 本次复用的 token 数 (从引擎那行 "prompt=N tok 用时 ..s (快照/会话/全量 复用M tok)" 解析)
+        # 以前 usage.prompt_tokens 硬写 13, 多轮时就报错了 —— 现在报引擎实测值。
+        self.last_prompt_tok = 0
+        self.last_reused = 0
+        self.last_vis_info = ""
+        if os.path.exists(FIFO):
+            os.remove(FIFO)
+        os.mkfifo(FIFO, 0o600)
+        # 常开 O_RDWR: FIFO 的读端永不 EOF, 写端永不收到 EPIPE
+        self.wfd = os.open(FIFO, os.O_RDWR)
+        self.rfd = os.open(FIFO, os.O_RDWR)
+        # ★ VIS_*_PASSTHRU: 引擎的调档变量必须【显式】写进子进程 env ——
+        #   实测: 只在 start.sh 里 export 不起作用 (svc_guard/cron 拉起的那条链没有这些变量)
+        # ★ 第24轮: 再加两件取证装备 ——
+        #   ulimit -c unlimited: apport 对"非发行版包"的可执行文件只在 core limit 非 0 时
+        #     才写 core (证据: /var/log/apport.log.1 里 ovf_repro 那条 "writing core dump to ...")
+        #   LD_PRELOAD crashbt.so: 崩溃瞬间把 PC/栈帧写 orn3_crash.log (本机无 gdb)
+        pre = ("LD_PRELOAD=%s " % CRASHBT) if os.path.exists(CRASHBT) else ""
+        inner = ("ulimit -c unlimited 2>/dev/null; exec env %sLD_LIBRARY_PATH=%s VIS_CH=%s VIS_CHA=%s VIS_FOLD=%s %s --n %s --model %s < %s"
+                 % (pre, LDP, VIS_CH, VIS_CHA, VIS_FOLD, ENG, NGEN, MODEL, FIFO))
+        cmd = [SAFEBIN, "-n", "orn_serve", "-t", str(SAFEMAX), "--", "/bin/sh", "-c", inner]
+        log("启动引擎(安全网下):", " ".join(cmd))
+        self.p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, bufsize=0)
+        log("safe_run pid=%d, FIFO=%s, 等权重常驻 HBM(~20s)...%s"
+            % (self.p.pid, FIFO, ("  [crashbt=%s]" % CRASHBT) if pre else ""))
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        try:
+            while True:
+                line = self.p.stdout.readline()
+                if not line:
+                    break
+                s = line.decode("utf-8", "replace").rstrip("\r\n")
+                if "权重常驻 HBM" in s:
+                    # ★ 关键修正: 以前是 if "就绪" in s —— 引擎在【灌权重一开始】就打
+                    #   "chip0 api::Context 就绪", 于是 /health 早在权重就位前 ~75s 就报
+                    #   ready=true; 客户端此时发出的请求只能在 FIFO 里干等,
+                    #   这正是"重启后第一发「你好」墙钟 56.9s"的根因。
+                    #   改为只认"权重常驻 HBM"那一行 —— 权重真的在 HBM 上了才算 ready。
+                    self.ready = True; log("引擎就绪(权重已常驻 HBM)")
+                elif "就绪" in s:
+                    log("引擎加载中|", s[:120])
+                elif s.startswith(("[orn]", "XPURT", "[WARN", "[safe_run]")):
+                    log("引擎|", s[:170])
+                # ★ 第24轮: 从 safe_run 的输出里判定死因 (卡异常 vs 自身退出 vs 超时)
+                if s.startswith("[safe_run]"):
+                    self.safelines.append(s)
+                    if len(self.safelines) > 40:
+                        self.safelines.pop(0)
+                    if ("检测到卡异常" in s) or ("本次出现卡异常" in s):
+                        self.card_exc = True
+                    m = re.search(r"判定:\s*(.+)$", s)
+                    if m:
+                        self.verdict = m.group(1).strip()
+                self.q.put(s)
+        except Exception as e:
+            log("引擎输出读线程结束: %r" % (e,))
+        finally:
+            self.q.put(None)
+
+    def teardown(self):
+        """拆掉本会话: 先停 safe_run, 再关 FIFO fd。新 Engine 会自己重建 FIFO。"""
+        self.dead = True
+        try:
+            if self.p.poll() is None:
+                self.p.terminate()
+                try:
+                    self.p.wait(timeout=5)
+                except Exception:
+                    self.p.kill()
+        except Exception:
+            pass
+        for fd in (getattr(self, "wfd", None), getattr(self, "rfd", None)):
+            try:
+                if fd is not None:
+                    os.close(fd)
+            except Exception:
+                pass
+        self.wfd = self.rfd = None
+        try:
+            if self.p.stdout:
+                self.p.stdout.close()
+        except Exception:
+            pass
+
+    def alive(self):
+        return (not self.dead) and self.p.poll() is None
+
+    def _write_all(self, data):
+        while data:
+            try:
+                n = os.write(self.wfd, data)
+                data = data[n:]
+            except OSError as e:
+                if e.errno == errno.EINTR:
+                    continue
+                raise
+
+    def vis_send(self, path, W, H, timeout=900):
+        """发 !VIS <path> <W> <H> -> 等 __VIS__ <n_tok>; 返回图像 token 数"""
+        with self.lock:
+            if not self.alive():
+                raise RuntimeError("引擎不可用: %s" % (self.reason or "进程已退出"))
+            self._write_all(("!VIS %s %d %d\n" % (path, W, H)).encode("ascii"))
+            t0 = time.time()
+            while time.time() - t0 < timeout:
+                try:
+                    line = self.q.get(timeout=1.0)
+                except queue.Empty:
+                    if not self.alive():
+                        raise RuntimeError("引擎在视觉编码中退出")
+                    continue
+                if line is None:
+                    raise RuntimeError("引擎退出")
+                if line.startswith("[vis] 完成"):        # ★ VISINFO_FIX: 视觉塔耗时在此被消费
+                    self.last_vis_info = line
+                if line.startswith("__VIS__"):
+                    p = line.split()
+                    if len(p) >= 2 and p[1].isdigit():
+                        return int(p[1])
+                    raise RuntimeError("视觉塔失败: %s" % line)
+            raise RuntimeError("视觉编码超时")
+
+    def vis_reset(self):
+        with self.lock:
+            if self.alive():
+                self._write_all(b"!VISR\n")
+
+    def generate(self, prompt, max_tokens, on_token=None, sid=""):
+        with self.lock:
+            if not self.alive():
+                raise RuntimeError("引擎不可用: %s" % (self.reason or "进程已退出"))
+            sids = ("sid=%s@" % sid) if sid else ""
+            req = "@%d@%sb64:%s\n" % (max_tokens, sids,
+                                    base64.b64encode(prompt.encode("utf-8", "ignore")).decode("ascii"))
+            try:
+                self._write_all(req.encode("ascii"))
+            except OSError as e:
+                self.dead = True; self.reason = "写 FIFO 失败: %r" % (e,)
+                raise RuntimeError(self.reason)
+            t0 = time.time()
+            out, ntok, started, pbuf = [], 0, False, b""
+            cb_err = None
+            self.last_prompt_tok, self.last_reused = 0, 0
+            while True:
+                try:
+                    line = self.q.get(timeout=2400)
+                except queue.Empty:
+                    self.dead = True
+                    self.hang = True
+                    self.reason = "引擎 2400s 无输出, 判卡死 (看护会在两芯 RUNNING 前提下重启)"
+                    raise RuntimeError(self.reason)
+                if line is None:
+                    self.dead = True
+                    self.reason = ("引擎进程结束(rc=%s, 判定=%s) —— 由看护决定是否重启"
+                                   % (self.p.poll(), self.verdict or "?"))
+                    raise RuntimeError(self.reason)
+                if "复用" in line:
+                    self.prefill_info = line
+                    # 引擎原始行: "[orn] prompt=13 tok 用时 23.09s (全量 复用0 tok) | 生成 ..."
+                    try:
+                        m = re.search(r"prompt=(\d+) tok", line)
+                        if m: self.last_prompt_tok = int(m.group(1))
+                        m = re.search(r"复用(\d+) tok", line)
+                        if m: self.last_reused = int(m.group(1))
+                    except Exception:
+                        pass
+                if line.startswith("[vis] 完成"):
+                    self.last_vis_info = line
+                if line == "__BEGIN__":
+                    started = True; continue
+                if line == "__END__":
+                    break
+                if not started or not line.startswith("__TOK__ "):
+                    continue
+                try:
+                    tb = bytes.fromhex(line[8:].strip())
+                except Exception:
+                    tb = b""
+                if RAWTOK:
+                    try:
+                        with open(RAWLOG, "a") as rf:
+                            rf.write("%s\n" % line[8:].strip())
+                    except Exception:
+                        pass
+                ntok += 1; pbuf += tb
+                try:
+                    s = pbuf.decode("utf-8"); pbuf = b""
+                except UnicodeDecodeError as e:
+                    if e.start > 0:
+                        s = pbuf[:e.start].decode("utf-8", "replace"); pbuf = pbuf[e.start:]
+                    else:
+                        s = ""
+                if s:
+                    out.append(s)
+                    # ★ 第24轮: 客户端中途断开(EPIPE/ECONNRESET)绝不允许打断引擎 ——
+                    #   否则本次输出残留在队列里会串给下一条请求 (队列错位)。
+                    #   这里记下异常但【继续排空到 __END__】, 循环结束后再抛。
+                    if on_token and cb_err is None:
+                        try:
+                            on_token(s)
+                        except Exception as ce:
+                            cb_err = ce
+                            log("客户端回调异常(继续排空引擎输出以保持队列同步): %r" % (ce,))
+            dt = time.time() - t0
+            self.ntok_total += ntok; self.gen_secs += dt; self.nreq += 1
+            if pbuf:
+                out.append(pbuf.decode("utf-8", "replace"))
+            txt = "".join(out)
+            for m in ("<|im_end|>", "<|im_start|>", "</think>", "<think>", "<s>"):
+                i = txt.find(m)
+                if i >= 0: txt = txt[:i]
+            if cb_err is not None:
+                raise cb_err
+            return txt.strip(), ntok, dt
+
+# ============================================================================
+# ★ 第24轮护城河: EngineSup —— 看护引擎进程, 死了立即重启, 重启期间请求排队
+# ============================================================================
+class EngineSup:
+    """与 Engine 同名同形的外壳 (其余代码零改动), 但多出:
+         - 引擎一退出 => 立即自动重启 (不等 cron/svc_guard 的 5 分钟)
+         - 重启期间 ready=False => 请求在 _wait_ready 里排队, 不回 503
+         - 重启/死亡计数出 /health (engine_restarts / engine_deaths / last_death)
+       ★ 安全红线: safe_run 判定【卡异常】或两芯 state 不是 RUNNING => 永久 dead,
+         绝不自动重启、绝不 soft_reset (与 safe_run 纪律一致)。"""
+
+    _DELEG_SET = ("prefill_info",)
+
+    def __init__(self):
+        object.__setattr__(self, "rl", threading.Lock())       # 重启串行化
+        object.__setattr__(self, "req_lock", threading.Lock()) # 请求串行化(引擎单槽)
+        self.inner = None
+        self.gen = 0
+        self.restarts = 0
+        self.deaths = []
+        self.card_exc = False
+        self.perma_dead = False
+        self.reason = ""
+        self.boot_t = time.time()
+        self.acc_nreq = 0
+        self.acc_ntok = 0
+        self.acc_secs = 0.0
+        self.start_fails = 0
+        self._start_engine("首次启动")
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    # ---------------- 属性透传 ----------------
+    def __getattr__(self, k):
+        inr = self.__dict__.get("inner")
+        if inr is not None and k != "inner":
+            return getattr(inr, k)
+        raise AttributeError(k)
+
+    def __setattr__(self, k, v):
+        if k in EngineSup._DELEG_SET:
+            inr = self.__dict__.get("inner")
+            if inr is not None:
+                setattr(inr, k, v); return
+        object.__setattr__(self, k, v)
+
+    @property
+    def ready(self):
+        return bool(self.inner is not None and self.inner.ready and not self.perma_dead)
+
+    def usable(self):
+        """还能不能救活 —— 只有"永久 dead"才不可用(那时才允许回 503)。"""
+        return not self.perma_dead
+
+    def alive(self):
+        # 对 /health 与 do_POST 而言: 正在重启 == 还活着(请求排队), 不是 engine:dead
+        return not self.perma_dead
+
+    # ---------------- 启停 ----------------
+    def _permadeath(self, why):
+        self.perma_dead = True
+        self.reason = why
+        log("!!!! 停止自动看护 (永久 dead): %s" % why)
+        log("!!!! 安全红线: 不自动重启、不 soft_reset —— 人工确认 /proc/xpu/dev*/state 后再 start.sh")
+
+    def _start_engine(self, why):
+        with self.rl:
+            if self.perma_dead:
+                return None
+            old = self.inner
+            if old is not None:
+                try:
+                    old.teardown()
+                except Exception as e:
+                    log("旧引擎清理异常(忽略): %r" % (e,))
+                _reap_stragglers()
+                if not _await_card_free(30.0):
+                    # 不立刻判死: 可能只是别人(人工测试)还占着卡。记日志交给看护下一拍再试。
+                    self.start_fails += 1
+                    log("!! 旧引擎/其它进程仍持有 /dev/xpu* (第%d次) => 本次不启动, 防双实例抢卡; 持卡者: %s"
+                        % (self.start_fails, _card_holders()))
+                    if self.start_fails >= 10:
+                        self._permadeath("连续 %d 次无法释放 /dev/xpu* => 停手交人工" % self.start_fails)
+                    return None
+            st = _card_states()
+            if st != ("RUNNING", "RUNNING"):
+                self.card_exc = True
+                self._permadeath("两芯 state=%s/%s 不是 RUNNING => 疑似卡异常, 按红线不自动重启"
+                                 % (st[0], st[1]))
+                return None
+            try:
+                e = Engine()
+            except Exception as ex:
+                self._permadeath("引擎启动失败: %r" % (ex,))
+                return None
+            self.inner = e
+            self.gen += 1
+            self.boot_t = time.time()
+            self.start_fails = 0
+            if old is not None:
+                # 累计统计: 新 Engine 的计数器从 0 开始, 服务级总量不能被重启清零
+                self.acc_nreq += old.nreq
+                self.acc_ntok += old.ntok_total
+                self.acc_secs += old.gen_secs
+                self.restarts += 1
+                log("=== 引擎已重启: 第 %d 代 (累计重启 %d 次) | 原因: %s ==="
+                    % (self.gen, self.restarts, why))
+                if self.restarts > RESTART_BUDGET:
+                    self._permadeath("重启次数 %d 超过预算 %d => 疑似持续故障, 停手交人工"
+                                     % (self.restarts, RESTART_BUDGET))
+                    return None
+            else:
+                log("=== 引擎第 %d 代已启动 ===" % self.gen)
+            return e
+
+    def _watch(self):
+        log("看护线程启动 (每 %.1fs 一次; 引擎一退出即自动重启; 卡异常则停手)"
+            % WATCH_EVERY)
+        while True:
+            try:
+                time.sleep(WATCH_EVERY)
+                if self.perma_dead:
+                    continue
+                inr = self.inner
+                if inr is None:
+                    self._start_engine("看护: 无引擎实例"); continue
+                if inr.alive():
+                    continue
+                rc = inr.p.poll()
+                up = time.time() - inr.spawn_t
+                why = ("看护发现引擎退出 rc=%s 判定=%s 存活=%.1fs"
+                       % (rc, inr.verdict or "?", up))
+                rec = {"t": time.strftime("%F %T"), "rc": rc, "verdict": inr.verdict,
+                       "uptime_s": round(up, 1), "card_exc": bool(inr.card_exc)}
+                self.deaths.append(rec)
+                log("!!! %s" % why)
+                for l in inr.safelines[-6:]:
+                    log("!!! 引擎死前(safe_run): %s" % l[:170])
+                if inr.card_exc:
+                    self.card_exc = True
+                    self._permadeath("safe_run 判定卡异常 => 按红线不自动重启: %s" % (inr.verdict or "?"))
+                    continue
+                log("=> 非卡异常退出 => 立即自动重启 (第 %d 次)" % (self.restarts + 1))
+                self._start_engine(why)
+            except Exception as e:
+                log("看护线程异常(忽略并继续): %r" % (e,))
+
+    # ---------------- 排队/等待 ----------------
+    def wait_ready(self, maxt=None):
+        if maxt is None:
+            maxt = float(os.environ.get("K200_WAIT_MAX", "1800"))
+        t0 = time.time()
+        while True:
+            if self.ready:
+                return True
+            if self.perma_dead:
+                return False
+            if (time.time() - t0) >= maxt:
+                return False
+            time.sleep(1.0)
+
+    def ensure_ready(self, maxt=None):
+        """引擎不在/正在重启 => 这里把它拉起来并等就绪 (请求排队, 不抛 503 给上游)。"""
+        if self.perma_dead:
+            return False
+        inr = self.inner
+        if inr is None or not inr.alive():
+            log("请求到达时引擎不在 => 立即同步拉起, 本请求排队等待")
+            self._start_engine("请求触发")
+        return self.wait_ready(maxt)
+
+    # ---------------- 请求路径 (与 Engine 同名) ----------------
+    def generate(self, prompt, max_tokens, on_token=None, sid=""):
+        if not self.ensure_ready():
+            raise RuntimeError("引擎不可用: %s" % (self.reason or "未就绪且超过等待上限"))
+        with self.req_lock:
+            inr = self.inner
+            if inr is None or not inr.alive():
+                if not self.ensure_ready():
+                    raise RuntimeError("引擎不可用: %s" % (self.reason or "未就绪且超过等待上限"))
+                inr = self.inner
+            return inr.generate(prompt, max_tokens, on_token=on_token, sid=sid)
+
+    def vis_send(self, path, W, H, timeout=900):
+        if not self.ensure_ready():
+            raise RuntimeError("引擎不可用: %s" % (self.reason or "未就绪且超过等待上限"))
+        with self.req_lock:
+            return self.inner.vis_send(path, W, H, timeout)
+
+    def vis_reset(self):
+        inr = self.inner
+        if inr is not None and inr.alive():
+            inr.vis_reset()
+
+    # ---------------- 汇总统计 (跨重启不归零) ----------------
+    @property
+    def nreq_total(self):
+        return self.acc_nreq + (self.inner.nreq if self.inner else 0)
+
+    @property
+    def ntok_total(self):
+        return self.acc_ntok + (self.inner.ntok_total if self.inner else 0)
+
+    @property
+    def gen_secs(self):
+        return self.acc_secs + (self.inner.gen_secs if self.inner else 0.0)
+
+ENGINE = None
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def _wait_ready(self, maxt=None):
+        # ★ WAITREADY (第24轮升级): 未就绪时【排队等待】而不是回 503。
+        #   现在同时覆盖「引擎死了正在自动重启/灌权重」这一段 —— 客户端与 NAS 上的
+        #   中转站都看不到一次失败, 渠道不会被自动禁用。
+        import os as _os, time as _t
+        if maxt is None:
+            maxt = float(_os.environ.get("K200_WAIT_MAX", "1800"))
+        t0 = _t.time()
+        while not ENGINE.ready:
+            if not ENGINE.usable():
+                return False
+            if (_t.time() - t0) >= maxt:
+                return False
+            _t.sleep(1.0)
+        return True
+    def _send(self, code, obj):
+        b = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        try: self.wfile.write(b)
+        except Exception: pass
+    def do_GET(self):
+        p = self.path.rstrip("/")
+        if p in ("/health", "/healthz"):
+            E = ENGINE
+            ok = E.ready
+            live = E.usable()
+            obj = {"status": "ok" if ok else ("loading" if live else "failed"),
+                   "engine": "alive" if ok else ("restarting" if live else "dead"),
+                   "ready": ok,
+                   "note": ("" if ok else
+                            ("引擎正在自动重启/灌权重(约 75s); 此刻的请求会排队等待, 不会被 503"
+                             if live else "引擎永久 dead: %s" % E.reason)),
+                   "model": MODEL_ID, "requests": E.nreq_total,
+                   "tok_total": E.ntok_total,
+                   "gen_secs": round(E.gen_secs, 1),
+                   "tok_per_s": round(E.ntok_total / E.gen_secs, 3) if E.gen_secs else None,
+                   # ★ 第24轮新增: 看护可观测字段
+                   "engine_restarts": E.restarts,
+                   "engine_gen": E.gen,
+                   "engine_uptime_s": round(time.time() - E.boot_t, 1),
+                   "engine_deaths": len(E.deaths),
+                   "last_death": E.deaths[-1] if E.deaths else None,
+                   "card_exception": E.card_exc,
+                   "watchdog": "on" if live else "stopped",
+                   "crashbt": os.path.exists(CRASHBT)}
+            self._send(200 if live else 503, obj)
+            return
+        if p in ("/v1/models", "/models"):
+            self._send(200, {"object": "list", "data": [{"id": MODEL_ID, "object": "model",
+                                                         "owned_by": "k200-ornith"}]}); return
+        self._send(404, {"error": {"message": "GET /health | /v1/models"}})
+    # ============ OpenAI 兼容: stream=true 的 SSE 流式 ============
+    def _stream(self, req, prompt, mt, sid):
+        cid = "chatcmpl-k200-%d" % int(time.time() * 1000)
+        created = int(time.time())
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+
+            def ev(obj):
+                self.wfile.write(("data: %s\n\n" % json.dumps(obj, ensure_ascii=False)).encode("utf-8"))
+                self.wfile.flush()
+
+            ev({"id": cid, "object": "chat.completion.chunk", "created": created, "model": MODEL_ID,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]})
+
+            def cb(tb):
+                c = tb if isinstance(tb, str) else tb.decode("utf-8", "ignore")
+                if not c:
+                    return
+                ev({"id": cid, "object": "chat.completion.chunk", "created": created, "model": MODEL_ID,
+                    "choices": [{"index": 0, "delta": {"content": c}, "finish_reason": None}]})
+
+            try:
+                txt, ntok, dt = ENGINE.generate(prompt, mt, on_token=cb, sid=sid)
+            except Exception as e:
+                ev({"id": cid, "object": "chat.completion.chunk", "created": created, "model": MODEL_ID,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                    "k200": {"error": str(e)}})
+                self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush(); return
+
+            # ★ 收尾: 必须发带 finish_reason 的最终 chunk, 否则客户端报 "Stream ended without finish_reason"
+            ev({"id": cid, "object": "chat.completion.chunk", "created": created, "model": MODEL_ID,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "k200": {"gen_secs": round(dt, 2), "tok_per_s": round(ntok / dt, 4) if dt else None,
+                         "prompt_tokens": ENGINE.last_prompt_tok,
+                         "prefill_reused_tokens": ENGINE.last_reused, "sid": sid}})
+            if (req.get("stream_options") or {}).get("include_usage"):
+                ev({"id": cid, "object": "chat.completion.chunk", "created": created, "model": MODEL_ID,
+                    "choices": [], "usage": {"prompt_tokens": ENGINE.last_prompt_tok or 13,
+                                             "completion_tokens": ntok,
+                                             "total_tokens": (ENGINE.last_prompt_tok or 13) + ntok}})
+            self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # ★ 第24轮: 客户端中途断开是正常事件 —— generate 已经排空到 __END__, 队列没被污染,
+            #   这里只记一行日志, 不再当错误(以前会 unwound 到 500)。
+            log("客户端中途断开(SSE 输出被截断), 引擎状态已排空保持同步")
+        except Exception as e:
+            try:
+                self._send(500, {"error": {"message": str(e)}})
+            except Exception:
+                pass
+    def do_POST(self):
+        if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
+            self._send(404, {"error": {"message": "use POST /v1/chat/completions"}}); return
+        n = int(self.headers.get("Content-Length", "0"))
+        try:
+            req = json.loads(self.rfile.read(n).decode("utf-8"))
+        except Exception as e:
+            self._send(400, {"error": {"message": "bad json: %r" % (e,)}}); return
+        msgs = req.get("messages") or [{"role": "user", "content": req.get("prompt", "")}]
+        mt = int(req.get("max_tokens") or req.get("max_completion_tokens") or NGEN)
+        if mt <= 0 or mt > 512: mt = int(NGEN)
+        if not ENGINE.usable():
+            self._send(503, {"error": {"message": "engine permanently dead: %s" % ENGINE.reason}}); return
+        if not ENGINE.ready:
+            # ★ WAITREADY: 等权重常驻 HBM (或等引擎自动重启完成) 再答,
+            #   不向上游抛失败(否则中转站会禁用渠道)
+            log("引擎未就绪/正在重启, 请求排队等待 (上限 %ss, 第%d代)"
+                % (os.environ.get("K200_WAIT_MAX", "1800"), ENGINE.gen))
+            if not self._wait_ready():
+                self._send(503, {"error": {"message": "engine loading/restarting: 超过排队上限 %ss"
+                                                      % os.environ.get("K200_WAIT_MAX", "1800")}}); return
+        # ★ VIS_ORDER_FIX: 引擎已就绪, 再送图
+        vision = []
+        try:
+            _t, urls = split_content(msgs[-1].get("content", ""))
+            if urls:
+                if not ENGINE.ready and not self._wait_ready():
+                    self._send(503, {"error": {"message": "engine loading/restarting"}}); return
+                ENGINE.vis_reset()
+                tvis = time.time()
+                for u in urls:
+                    if not u:
+                        continue
+                    hp, iw, ih = prep_image(u)
+                    n = ENGINE.vis_send(hp, iw, ih)
+                    vision.append(n)
+                    log("图像 %s %dx%d -> %d token" % (os.path.basename(hp), iw, ih, n))
+                log("图像编码合计 %.2fs (%d 张)" % (time.time() - tvis, len(vision)))
+        except Exception as e:
+            log("图像处理失败:", repr(e))
+            self._send(400, {"error": {"message": "image: %r" % (e,)}}); return
+        prompt = build_prompt(msgs, vision)
+        # 会话 id: 用【首条 user 消息】做键 => 同一会话的多轮请求共享 sid, 引擎才能续算 KV/状态
+        try:
+            first = ""
+            for m in msgs:
+                if m.get("role") == "user":
+                    c = m.get("content", "")
+                    first = " ".join(x.get("text", "") for x in c if isinstance(x, dict)) if isinstance(c, list) else str(c)
+                    break
+            sid = hashlib.sha1(first.encode("utf-8")).hexdigest()[:16]
+        except Exception:
+            sid = ""
+        if req.get("stream"):
+            return self._stream(req, prompt, mt, sid)
+        t0 = time.time()
+        try:
+            ENGINE.prefill_info = ""
+            txt, ntok, dt = ENGINE.generate(prompt, mt, sid=sid)
+        except Exception as e:
+            self._send(500, {"error": {"message": str(e)}}); return
+        self._send(200, {"id": "chatcmpl-k200-%d" % int(time.time() * 1000),
+                         "object": "chat.completion", "created": int(time.time()), "model": MODEL_ID,
+                         "choices": [{"index": 0, "message": {"role": "assistant", "content": txt},
+                                      "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": ENGINE.last_prompt_tok or 13,
+                                   "completion_tokens": ntok,
+                                   "total_tokens": (ENGINE.last_prompt_tok or 13) + ntok},
+                         "k200": {"gen_secs": round(dt, 2), "wall_secs": round(time.time() - t0, 2),
+                                  "vision_tokens": vision, "image_encode": ENGINE.last_vis_info[:160],
+                                  "tok_per_s": round(ntok / dt, 4) if dt else None,
+                                  "prompt_chars": len(prompt), "nothink": True, "sid": sid,
+                                  "prompt_tokens": ENGINE.last_prompt_tok,
+                                  "prefill_reused_tokens": ENGINE.last_reused,
+                                  "engine_prefill": ENGINE.prefill_info.strip()[:200]}})
+
+class TS(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+if __name__ == "__main__":
+    ENGINE = EngineSup()
+    srv = TS(("0.0.0.0", PORT), H)
+    log("监听 0.0.0.0:%d (引擎在后台加载; 看护已开: 引擎一退出即自动重启, 重启期间请求排队)"
+        % PORT)
+    srv.serve_forever()

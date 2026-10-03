@@ -1,0 +1,40 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// 1) (cluster,core) 生效映射
+__global__ void map_k(int *o) {
+    int c = cluster_id(), k = core_id();
+    if (c < 16 && k < 64) o[c * 64 + k] = c * 100 + k + 1;
+}
+void run_map(int *o, int cl, int co) { map_k<<<cl, co>>>(o); }
+
+// 2) GM2LM 读带宽 (每核一个 16KB slab, 阻塞式)
+__global__ void rd_k(const unsigned char *W, int slab, int nslab, float *out) {
+    int tid  = cluster_id() * core_num() + core_id();
+    int nthr = cluster_num() * core_num();
+    __local__ unsigned char buf[16384];
+    int acc = 0;
+    for (int s = tid; s < nslab; s += nthr) {
+        GM2LM(W + (size_t)s * slab, buf, slab);
+        acc += buf[0] + buf[slab - 1] + buf[slab / 2];
+    }
+    out[tid] = (float)acc;
+}
+void run_rd(const void *W, int slab, int nslab, void *out, int cl, int co) {
+    rd_k<<<cl, co>>>((const unsigned char *)W, slab, nslab, (float *)out);
+}
+
+// 3) 本地内存容量探测: 用 NKB local 数组做一次 DMA + 一次读回
+__global__ void lm_k(const unsigned char *W, int kb, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    __local__ unsigned char b8[8192];
+    __local__ unsigned char b16[16384];
+    __local__ unsigned char b32[32768];
+    int acc = 0;
+    if (kb <= 8)  { GM2LM(W, b8, 8192);   acc = b8[0] + b8[8191]; }
+    else if (kb <= 16) { GM2LM(W, b16, 16384); acc = b16[0] + b16[16383]; }
+    else { GM2LM(W, b32, 32768); acc = b32[0] + b32[32767]; }
+    out[tid] = (float)acc;
+}
+void run_lm(const void *W, int kb, void *out, int cl, int co) { lm_k<<<cl, co>>>((const unsigned char *)W, kb, (float *)out); }

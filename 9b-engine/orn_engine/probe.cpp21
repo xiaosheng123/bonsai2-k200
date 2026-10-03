@@ -1,0 +1,466 @@
+// probe.cpp — 逐元素/归一化/激活 官方算子极小尺寸单发验证 (安全流程第 1 步)
+//   每个测试单独进程 (argv 选择); 只调 func_dec.h 里的官方算子, 绝不碰禁用算子
+//   数值对拍 vs 主机 f32 参考
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <string>
+#include <vector>
+#include <chrono>
+#include <xpu/runtime.h>
+#include "xpu/api.h"
+#include "xpu/refactor/nn.h"
+#include "xpu/refactor/math.h"
+#include "xpu/refactor/context/xpu_act_type.h"
+
+namespace api = baidu::xpu::api;
+using namespace baidu::xpu::api;
+
+static double NOW() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static double relrms(const std::vector<float>& a, const std::vector<float>& b) {
+    double se = 0, s2 = 0;
+    for (size_t i = 0; i < a.size(); i++) { double d = (double)a[i] - (double)b[i]; se += d * d; s2 += (double)b[i] * (double)b[i]; }
+    return 100.0 * sqrt(se / (s2 > 0 ? s2 : 1e-30));
+}
+static void fill(std::vector<float>& v, unsigned seed, float amp) {
+    unsigned s = seed; for (size_t i = 0; i < v.size(); i++) { s = s * 1664525u + 1013904223u; v[i] = ((float)((s >> 8) & 0xFFFF) / 32768.0f - 1.0f) * amp; }
+}
+// 小工具: H2D/D2H
+struct DBuf {
+    void* p = nullptr; size_t n = 0;
+    void alloc(size_t bytes) { if (xpu_malloc(&p, bytes)) { printf("FATAL alloc %zu\n", bytes); exit(1);} n = bytes; }
+    ~DBuf() { if (p) xpu_free(p); }
+    void up(const void* h, size_t bytes) { if (xpu_memcpy(p, h, bytes, XPU_HOST_TO_DEVICE)) { printf("FATAL H2D\n"); exit(1);} }
+    void down(void* h, size_t bytes) { if (xpu_memcpy(h, p, bytes, XPU_DEVICE_TO_HOST)) { printf("FATAL D2H\n"); exit(1);} xpu_wait(); }
+};
+
+static int T_LN(int m, int n) {
+    printf("[probe] layer_norm m=%d n=%d\n", m, n);
+    std::vector<float> x((size_t)m * n), w(n), b(n), y((size_t)m * n), ref((size_t)m * n);
+    fill(x, 12345u, 3.0f); fill(w, 999u, 1.5f); fill(b, 777u, 0.5f);
+    // 主机参考
+    const float eps = 1e-6f;
+    for (int t = 0; t < m; t++) {
+        const float* xx = &x[(size_t)t * n];
+        double s = 0; for (int i = 0; i < n; i++) s += xx[i];
+        double mean = s / n, v = 0;
+        for (int i = 0; i < n; i++) { double d = xx[i] - mean; v += d * d; }
+        v /= n; double sc = 1.0 / sqrt(v + eps);
+        for (int i = 0; i < n; i++) ref[(size_t)t * n + i] = (float)((xx[i] - mean) * sc * w[i] + b[i]);
+    }
+    DBuf dx, dy, dw, db; dx.alloc((size_t)m * n * 4); dy.alloc((size_t)m * n * 4); dw.alloc(n * 4); db.alloc(n * 4);
+    dx.up(x.data(), (size_t)m * n * 4); dw.up(w.data(), n * 4); db.up(b.data(), n * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    double t0 = NOW();
+    int r = api::layer_norm(&ctx, m, n, (const float*)dx.p, (float*)dy.p, (const float*)dw.p, (const float*)db.p,
+                            eps, nullptr, nullptr, true);
+    int ww = xpu_wait();
+    double dt = NOW() - t0;
+    y.resize((size_t)m * n); dy.down(y.data(), (size_t)m * n * 4);
+    printf("[probe] layer_norm m=%d n=%d r=%d wait=%d  relrms=%.5f%%  t=%.3fms  y0=%.6f ref0=%.6f\n",
+           m, n, r, ww, relrms(y, ref), dt * 1000.0, y[0], ref[0]);
+    return (r == 0 && relrms(y, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_GELU(int len) {
+    printf("[probe] gelu len=%d\n", len);
+    std::vector<float> x(len), y(len), ref(len);
+    fill(x, 4242u, 6.0f);
+    for (int i = 0; i < len; i++) { float v = x[i]; ref[i] = 0.5f * v * (1.0f + tanhf(0.7978845608028654f * (v + 0.044715f * v * v * v))); }
+    DBuf dx, dy; dx.alloc((size_t)len * 4); dy.alloc((size_t)len * 4); dx.up(x.data(), (size_t)len * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int r = api::gelu(&ctx, (const float*)dx.p, (float*)dy.p, len);
+    int ww = xpu_wait();
+    dy.down(y.data(), (size_t)len * 4);
+    printf("[probe] gelu len=%d r=%d wait=%d relrms=%.5f%%  y0=%.6f ref0=%.6f\n", len, r, ww, relrms(y, ref), y[0], ref[0]);
+    return (r == 0 && relrms(y, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_EW(int m, int n) {
+    printf("[probe] elementwise_add / mul_2d / add_2d  m=%d n=%d\n", m, n);
+    std::vector<float> a((size_t)m * n), b(n), c(m), z((size_t)m * n), ref((size_t)m * n);
+    fill(a, 111u, 2.0f); fill(b, 222u, 1.0f); fill(c, 333u, 0.7f);
+    DBuf da, db, dc, dz;
+    da.alloc((size_t)m * n * 4); db.alloc(n * 4); dc.alloc(m * 4); dz.alloc((size_t)m * n * 4);
+    da.up(a.data(), (size_t)m * n * 4); db.up(b.data(), n * 4); dc.up(c.data(), m * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int bad = 0;
+    // (1) 行广播乘: z = a * b[1,n]
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] * b[i % n];
+    int r = api::elementwise_mul_2d(&ctx, (const float*)da.p, (const float*)db.p, (float*)dz.p, m, n, 1, n);
+    xpu_wait(); z.resize((size_t)m * n); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] mul_2d[a(m,n)*b(1,n)]   r=%d relrms=%.5f%%\n", r, relrms(z, ref)); bad |= (r || relrms(z, ref) > 0.5);
+    // (2) 列广播乘: z = a * c[m,1]
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] * c[i / n];
+    r = api::elementwise_mul_2d(&ctx, (const float*)da.p, (const float*)dc.p, (float*)dz.p, m, n, m, 1);
+    xpu_wait(); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] mul_2d[a(m,n)*c(m,1)]   r=%d relrms=%.5f%%\n", r, relrms(z, ref)); bad |= (r || relrms(z, ref) > 0.5);
+    // (3) 列广播加: z = a + c[m,1]
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] + c[i / n];
+    r = api::elementwise_add_2d(&ctx, (const float*)da.p, (const float*)dc.p, (float*)dz.p, m, n, m, 1);
+    xpu_wait(); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] add_2d[a(m,n)+c(m,1)]   r=%d relrms=%.5f%%\n", r, relrms(z, ref)); bad |= (r || relrms(z, ref) > 0.5);
+    // (4) 等长 add / sub
+    std::vector<float> a2((size_t)m * n); fill(a2, 444u, 2.0f);
+    DBuf da2; da2.alloc((size_t)m * n * 4); da2.up(a2.data(), (size_t)m * n * 4);
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] + a2[i];
+    r = api::elementwise_add(&ctx, (const float*)da.p, (const float*)da2.p, (float*)dz.p, m * n);
+    xpu_wait(); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] elementwise_add(len)     r=%d relrms=%.5f%%\n", r, relrms(z, ref)); bad |= (r || relrms(z, ref) > 0.5);
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] - a2[i];
+    r = api::elementwise_sub(&ctx, (const float*)da.p, (const float*)da2.p, (float*)dz.p, m * n);
+    xpu_wait(); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] elementwise_sub(len)     r=%d relrms=%.5f%%\n", r, relrms(z, ref)); bad |= (r || relrms(z, ref) > 0.5);
+    // (5) scale: y = a*alpha + beta, bias_after_scale=1 => y = a*alpha+beta
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] * 0.25f + 0.5f;
+    r = api::scale(&ctx, m * n, 0.25f, 0.5f, 1, (const float*)da.p, (float*)dz.p);
+    xpu_wait(); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] scale(a*0.25+0.5)        r=%d relrms=%.5f%%\n", r, relrms(z, ref)); bad |= (r || relrms(z, ref) > 0.5);
+    return bad;
+}
+
+static int T_SOFTMAX(int rows, int cols) {
+    printf("[probe] softmax2d_forward rows=%d cols=%d\n", rows, cols);
+    std::vector<float> x((size_t)rows * cols), y((size_t)rows * cols), ref((size_t)rows * cols);
+    fill(x, 5150u, 8.0f);
+    for (int t = 0; t < rows; t++) {
+        const float* p = &x[(size_t)t * cols];
+        double mx = -1e30; for (int i = 0; i < cols; i++) if (p[i] > mx) mx = p[i];
+        double s = 0; for (int i = 0; i < cols; i++) s += exp((double)p[i] - mx);
+        for (int i = 0; i < cols; i++) ref[(size_t)t * cols + i] = (float)(exp((double)p[i] - mx) / s);
+    }
+    DBuf dx, dy; dx.alloc((size_t)rows * cols * 4); dy.alloc((size_t)rows * cols * 4); dx.up(x.data(), (size_t)rows * cols * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int r = api::softmax2d_forward(&ctx, (const float*)dx.p, (float*)dy.p, rows, cols, false);
+    int ww = xpu_wait();
+    dy.down(y.data(), (size_t)rows * cols * 4);
+    double mxdiff = 0; for (size_t i = 0; i < y.size(); i++) { double d = fabs((double)y[i] - (double)ref[i]); if (d > mxdiff) mxdiff = d; }
+    printf("[probe] softmax2d rows=%d cols=%d r=%d wait=%d relrms=%.5f%% maxabs=%.3e  y0=%.6f ref0=%.6f\n",
+           rows, cols, r, ww, relrms(y, ref), mxdiff, y[0], ref[0]);
+    return (r == 0 && relrms(y, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_REDUCE(int m, int t, int n) {
+    printf("[probe] reduce_ew / broadcast_ew  m=%d t=%d n=%d\n", m, t, n);
+    std::vector<float> x((size_t)m * t * n), y((size_t)m * t), ref((size_t)m * t);
+    fill(x, 6161u, 3.0f);
+    for (int i = 0; i < m; i++) for (int j = 0; j < t; j++) {
+        float mx = -1e30f; for (int k = 0; k < n; k++) { float v = x[((size_t)i * t + j) * n + k]; if (v > mx) mx = v; }
+        ref[(size_t)i * t + j] = mx;
+    }
+    DBuf dx, dy; dx.alloc((size_t)m * t * n * 4); dy.alloc((size_t)m * t * 4); dx.up(x.data(), (size_t)m * t * n * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int bad = 0;
+    int xd[3] = {m, t, n}, rd[1] = {2};
+    int r = api::reduce(&ctx, (const float*)dx.p, (float*)dy.p, xd, 3, rd, 1, REDUCE_MAX);
+    int ww = xpu_wait();
+    y.resize((size_t)m * t); dy.down(y.data(), (size_t)m * t * 4);
+    printf("[probe] reduce MAX  r=%d wait=%d relrms=%.5f%%  y0=%.6f ref0=%.6f\n", r, ww, relrms(y, ref), y[0], ref[0]);
+    bad |= (r || relrms(y, ref) > 0.5);
+    // 行均值
+    for (int i = 0; i < m; i++) for (int j = 0; j < t; j++) {
+        double s = 0; for (int k = 0; k < n; k++) s += x[((size_t)i * t + j) * n + k];
+        ref[(size_t)i * t + j] = (float)(s / n);
+    }
+    r = api::reduce(&ctx, (const float*)dx.p, (float*)dy.p, xd, 3, rd, 1, REDUCE_MEAN);
+    xpu_wait(); dy.down(y.data(), (size_t)m * t * 4);
+    printf("[probe] reduce MEAN r=%d relrms=%.5f%%\n", r, relrms(y, ref)); bad |= (r || relrms(y, ref) > 0.5);
+    // broadcast_ew ADD: y[m,t,n] + x[m,t] (视为 m*t 向量广播)
+    std::vector<float> z((size_t)m * t * n);
+    DBuf dz; dz.alloc((size_t)m * t * n * 4);
+    r = api::broadcast_ew(&ctx, (const float*)dy.p, (float*)dz.p, m, t, n, ADD);
+    xpu_wait(); z.resize((size_t)m * t * n); dz.down(z.data(), (size_t)m * t * n * 4);
+    printf("[probe] broadcast_ew ADD(x=m*t vec) r=%d  z0=%.6f z1=%.6f  (y0=%.6f y1=%.6f)\n", r, z[0], z[1], y[0], y[1]);
+    return bad;
+}
+
+static int T_TRANS(int m, int n) {
+    printf("[probe] transpose %dx%d\n", m, n);
+    std::vector<float> x((size_t)m * n), y((size_t)m * n), ref((size_t)m * n);
+    fill(x, 7171u, 2.0f);
+    for (int i = 0; i < m; i++) for (int j = 0; j < n; j++) ref[(size_t)j * m + i] = x[(size_t)i * n + j];
+    DBuf dx, dy; dx.alloc((size_t)m * n * 4); dy.alloc((size_t)m * n * 4); dx.up(x.data(), (size_t)m * n * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int shape[2] = {m, n}, perm[2] = {1, 0};
+    int r = api::transpose(&ctx, (const float*)dx.p, (float*)dy.p, shape, perm, 2);
+    int ww = xpu_wait();
+    dy.down(y.data(), (size_t)m * n * 4);
+    printf("[probe] transpose r=%d wait=%d relrms=%.5f%%\n", r, ww, relrms(y, ref));
+    return (r == 0 && relrms(y, ref) < 0.5) ? 0 : 1;
+}
+
+
+static int T_RED0(int g, int m, int n) {
+    printf("[probe] reduce dim0  [%d,%d,%d] -> [%d,%d]\n", g, m, n, m, n);
+    std::vector<float> x((size_t)g * m * n), y((size_t)m * n), ref((size_t)m * n, 0.f);
+    fill(x, 8181u, 3.0f);
+    for (int c = 0; c < g; c++) for (int t = 0; t < m; t++) for (int i = 0; i < n; i++)
+        ref[(size_t)t * n + i] += x[((size_t)c * m + t) * n + i];
+    DBuf dx, dy; dx.alloc((size_t)g * m * n * 4); dy.alloc((size_t)m * n * 4);
+    dx.up(x.data(), (size_t)g * m * n * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int xd[3] = {g, m, n}, rd[1] = {0};
+    int r = api::reduce(&ctx, (const float*)dx.p, (float*)dy.p, xd, 3, rd, 1, REDUCE_SUM);
+    int ww = xpu_wait();
+    y.resize((size_t)m * n); dy.down(y.data(), (size_t)m * n * 4);
+    printf("[probe] reduce SUM dim0 r=%d wait=%d relrms=%.5f%%  y0=%.5f ref0=%.5f\n", r, ww, relrms(y, ref), y[0], ref[0]);
+    // 2D 视作 reshape 对照: [g*m, n] 每 g 行求和
+    return (r == 0 && relrms(y, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_MUL2D_INPLACE(int m, int n) {
+    printf("[probe] elementwise_mul_2d 原地 (z==x) m=%d n=%d\n", m, n);
+    std::vector<float> a((size_t)m * n), b(n), ref((size_t)m * n);
+    fill(a, 9191u, 2.0f); fill(b, 9292u, 1.0f);
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] * b[i % n];
+    DBuf da, db; da.alloc((size_t)m * n * 4); db.alloc(n * 4);
+    da.up(a.data(), (size_t)m * n * 4); db.up(b.data(), n * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int r = api::elementwise_mul_2d(&ctx, (const float*)da.p, (const float*)db.p, (float*)da.p, m, n, 1, n);
+    int ww = xpu_wait();
+    std::vector<float> z((size_t)m * n); da.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] mul_2d 原地 r=%d wait=%d relrms=%.5f%%\n", r, ww, relrms(z, ref));
+    return (r == 0 && relrms(z, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_DIV2D(int m, int n) {
+    printf("[probe] elementwise_div_2d  a[m,n] / b[m,1]  m=%d n=%d\n", m, n);
+    std::vector<float> a((size_t)m * n), b(m), z, ref((size_t)m * n);
+    fill(a, 1313u, 2.0f); fill(b, 1414u, 1.0f);
+    for (int i = 0; i < m; i++) b[i] = 0.5f + 0.5f * fabsf(b[i]);   // 远离 0, 避免天然放大相对误差
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] / b[i / n];
+    DBuf da, db, dz; da.alloc((size_t)m * n * 4); db.alloc(m * 4); dz.alloc((size_t)m * n * 4);
+    da.up(a.data(), (size_t)m * n * 4); db.up(b.data(), m * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int r = api::elementwise_div_2d(&ctx, (const float*)da.p, (const float*)db.p, (float*)dz.p, m, n, m, 1);
+    int ww = xpu_wait();
+    z.resize((size_t)m * n); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] div_2d[a(m,n)/b(m,1)] r=%d wait=%d relrms=%.5f%%  z0=%.6f ref0=%.6f\n",
+           r, ww, relrms(z, ref), z[0], ref[0]);
+    return (r == 0 && relrms(z, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_REDDIM0(int m, int nc) {
+    printf("[probe] reduce MAX 2D dim0  [%d,%d] -> [1,%d]\n", m, nc, nc);
+    std::vector<float> x((size_t)m * nc), y, ref(nc, -1e30f);
+    fill(x, 1717u, 3.0f);
+    for (int i = 0; i < m; i++) for (int c = 0; c < nc; c++) if (x[(size_t)i * nc + c] > ref[c]) ref[c] = x[(size_t)i * nc + c];
+    DBuf dx, dy; dx.alloc((size_t)m * nc * 4); dy.alloc(nc * 4); dx.up(x.data(), (size_t)m * nc * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int xd[2] = {m, nc}, rd[1] = {0};
+    int r = api::reduce(&ctx, (const float*)dx.p, (float*)dy.p, xd, 2, rd, 1, REDUCE_MAX);
+    int ww = xpu_wait();
+    y.resize(nc); dy.down(y.data(), nc * 4);
+    printf("[probe] reduce MAX 2D dim0 r=%d wait=%d relrms=%.5f%%  y0=%.6f ref0=%.6f\n", r, ww, relrms(y, ref), y[0], ref[0]);
+    return (r == 0 && relrms(y, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_REDMIN3(int m, int nc, int cs) {
+    printf("[probe] reduce MIN 3D dim2  [%d,%d,%d] -> [%d,%d]\n", m, nc, cs, m, nc);
+    std::vector<float> x((size_t)m * nc * cs), y, ref((size_t)m * nc);
+    fill(x, 2323u, 3.0f);
+    for (int t = 0; t < m; t++) for (int c = 0; c < nc; c++) {
+        float mn = 1e30f;
+        for (int j = 0; j < cs; j++) { float v = x[((size_t)t * nc + c) * cs + j]; if (v < mn) mn = v; }
+        ref[(size_t)t * nc + c] = mn;
+    }
+    DBuf dx, dy; dx.alloc((size_t)m * nc * cs * 4); dy.alloc((size_t)m * nc * 4); dx.up(x.data(), (size_t)m * nc * cs * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int xd[3] = {m, nc, cs}, rd[1] = {2};
+    int r = api::reduce(&ctx, (const float*)dx.p, (float*)dy.p, xd, 3, rd, 1, REDUCE_MIN);
+    int ww = xpu_wait();
+    y.resize((size_t)m * nc); dy.down(y.data(), (size_t)m * nc * 4);
+    printf("[probe] reduce MIN 3D r=%d wait=%d relrms=%.5f%%  y0=%.6f ref0=%.6f\n", r, ww, relrms(y, ref), y[0], ref[0]);
+    return (r == 0 && relrms(y, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_ADDROW(int m, int n) {
+    printf("[probe] elementwise_add_2d 行广播 a[m,n] + b[1,n]  m=%d n=%d\n", m, n);
+    std::vector<float> a((size_t)m * n), b(n), z, ref((size_t)m * n);
+    fill(a, 5151u, 2.0f); fill(b, 5252u, 1.0f);
+    for (size_t i = 0; i < (size_t)m * n; i++) ref[i] = a[i] + b[i % n];
+    DBuf da, db, dz; da.alloc((size_t)m * n * 4); db.alloc(n * 4); dz.alloc((size_t)m * n * 4);
+    da.up(a.data(), (size_t)m * n * 4); db.up(b.data(), n * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int r = api::elementwise_add_2d(&ctx, (const float*)da.p, (const float*)db.p, (float*)dz.p, m, n, 1, n);
+    int ww = xpu_wait();
+    z.resize((size_t)m * n); dz.down(z.data(), (size_t)m * n * 4);
+    printf("[probe] add_2d[a(m,n)+b(1,n)] r=%d wait=%d relrms=%.5f%%  (应 =0, 加法精确)\n", r, ww, relrms(z, ref));
+    return (r == 0 && relrms(z, ref) < 0.5) ? 0 : 1;
+}
+
+static int T_MAXABS3(int m, int nc, int cs) {
+    printf("[probe] ★ 卡上 max|A| 归一链  m=%d nc=%d cs=%d (A 含负值)\n", m, nc, cs);
+    std::vector<float> x((size_t)m * nc * cs);
+    fill(x, 6363u, 3.0f);                       // 有正有负
+    std::vector<float> ref((size_t)m * nc);
+    for (int t = 0; t < m; t++) for (int c = 0; c < nc; c++) {
+        float am = 0;
+        for (int j = 0; j < cs; j++) { float a = fabsf(x[((size_t)t * nc + c) * cs + j]); if (a > am) am = a; }
+        ref[(size_t)t * nc + c] = am;           // 主机 fabsf 参考
+    }
+    std::vector<float> refMc(nc, 0.f);
+    for (int t = 0; t < m; t++) for (int c = 0; c < nc; c++) if (ref[(size_t)t * nc + c] > refMc[c]) refMc[c] = ref[(size_t)t * nc + c];
+    // 卡上: reduce MAX / reduce MIN / neg / elementwise_max / reduce MAX(Mc) / div f
+    DBuf dx, dmx, dmn, dng, dmc, df, dones;
+    dx.alloc((size_t)m * nc * cs * 4); dmx.alloc((size_t)m * nc * 4); dmn.alloc((size_t)m * nc * 4);
+    dng.alloc((size_t)m * nc * 4); dmc.alloc(nc * 4); df.alloc((size_t)m * nc * 4); dones.alloc(nc * 4);
+    dx.up(x.data(), (size_t)m * nc * cs * 4);
+    std::vector<float> ones(nc, 1.0f); dones.up(ones.data(), nc * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int xd3[3] = {m, nc, cs}, rd2[1] = {2}, xd2[2] = {m, nc}, rd0[1] = {0};
+    int r = api::reduce(&ctx, (const float*)dx.p, (float*)dmx.p, xd3, 3, rd2, 1, REDUCE_MAX);
+    r |= api::reduce(&ctx, (const float*)dx.p, (float*)dmn.p, xd3, 3, rd2, 1, REDUCE_MIN);
+    r |= api::neg(&ctx, (const float*)dmn.p, (float*)dng.p, m * nc);
+    r |= api::elementwise_max_2d(&ctx, (const float*)dmx.p, (const float*)dng.p, (float*)dmx.p, m, nc, m, nc);
+    r |= api::reduce(&ctx, (const float*)dmx.p, (float*)dmc.p, xd2, 2, rd0, 1, REDUCE_MAX);
+    r |= api::elementwise_div_2d(&ctx, (const float*)dmc.p, (const float*)dmx.p, (float*)df.p, 1, nc, m, nc);
+    int ww = xpu_wait();
+    std::vector<float> absmax((size_t)m * nc), Mc(nc), f((size_t)m * nc);
+    dmx.down(absmax.data(), (size_t)m * nc * 4); dmc.down(Mc.data(), nc * 4); df.down(f.data(), (size_t)m * nc * 4);
+    double amr = relrms(absmax, ref);
+    std::vector<float> reff((size_t)m * nc);
+    for (size_t i = 0; i < reff.size(); i++) reff[i] = refMc[i % nc] / ref[i];
+    double fr = relrms(f, reff);
+    double mcr = 0; for (int c = 0; c < nc; c++) mcr = fmax(mcr, fabs((double)Mc[c] - (double)refMc[c]));
+    printf("[probe] max|A| 链 r=%d wait=%d | absmax vs 主机 fabsf relrms=%.5f%% | Mc maxabs差=%.3e | f=Mc/absmax relrms=%.5f%%\n",
+           r, ww, amr, mcr, fr);
+    return (r == 0 && amr < 0.5 && mcr == 0.0) ? 0 : 1;
+}
+
+static int T_GELUZ(int m, int n, int nreal) {
+    printf("[probe] gelu 出/入异缓冲 + padding 尾部保持 0  m=%d n=%d nreal=%d\n", m, n, nreal);
+    std::vector<float> x((size_t)m * n, 0.f), ref((size_t)m * n, 0.f), y;
+    fill(x, 7474u, 4.0f);
+    for (int t = 0; t < m; t++) for (int j = nreal; j < n; j++) x[(size_t)t * n + j] = 0.f;   // padding 尾部
+    for (size_t i = 0; i < x.size(); i++) { float v = x[i]; ref[i] = 0.5f * v * (1.0f + tanhf(0.7978845608028654f * (v + 0.044715f * v * v * v))); }
+    DBuf dx, dy; dx.alloc((size_t)m * n * 4); dy.alloc((size_t)m * n * 4); dx.up(x.data(), (size_t)m * n * 4);
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int r = api::gelu(&ctx, (const float*)dx.p, (float*)dy.p, m * n);
+    int ww = xpu_wait();
+    y.resize((size_t)m * n); dy.down(y.data(), (size_t)m * n * 4);
+    int tailbad = 0;
+    for (int t = 0; t < m; t++) for (int j = nreal; j < n; j++) if (y[(size_t)t * n + j] != 0.f) tailbad++;
+    printf("[probe] gelu r=%d wait=%d relrms=%.5f%%  padding 尾部非 0 个数=%d (期望 0)\n", r, ww, relrms(y, ref), tailbad);
+    return (r == 0 && relrms(y, ref) < 0.5 && tailbad == 0) ? 0 : 1;
+}
+
+
+// ★★ 第 21 轮: 卡上除法的【分母夹逼】验死用例 (含负值 / 全零块)
+//   直接照描第 20 轮真实事故的形状: A = gelu 输出, float32 tanhf 饱和 ⇒ 某个 96 宽块【整块精确 0】
+//   ⇒ mx = 0 ⇒ 卡上 f = Mc/mx 除零 ⇒ FP_DIV0 打死 session (卡异常 17→18)。
+//   本用例把整条链走完 (reduce MAX/MIN → max|A| → ★夹逼★ → Mc → f=Mc/mx → 1/Mc → 行因子 → 转置 → An=A*f),
+//   并与【主机同式参考(带夹逼)】逐位对拍:
+//     mode 0 = 混合 (含负值 + 部分行的 96 宽块整块 0 + 某个 96 宽块【所有行】全 0)  <- 事故形状
+//     mode 1 = 整个分区全 0 (最极端)                                              <- 事故形状的极端
+//     mode 2 = 正常非负 (softmax 形状): 夹逼是"选择"运算 ⇒ 期望逐位不变
+static int T_DIVCLAMP(int m, int nc, int cs, int mode) {
+    const char* mn = (mode == 0) ? "混合(负值+部分行整块0+整块全0)" : (mode == 1 ? "整块全0(最极端)" : "正常非负");
+    printf("[probe] ★ 卡上归一链 + 分母夹逼  m=%d nc=%d cs=%d 用例=%s\n", m, nc, cs, mn);
+    const size_t MK = (size_t)m * nc * cs;
+    std::vector<float> x(MK), refA((size_t)m * nc), refAn(MK), refF((size_t)m * nc), refRf((size_t)m * nc);
+    if (mode == 2) { fill(x, 8888u, 2.0f); for (size_t i = 0; i < x.size(); i++) x[i] = fabsf(x[i]); }
+    else {
+        fill(x, 8888u, 3.0f);
+        for (int t = 0; t < m; t += 2)                        // 块 1: 部分行的整块为 0 (gelu 饱和的形状)
+            for (int j = 0; j < cs; j++) x[((size_t)t * nc + 1) * cs + j] = 0.f;
+        if (nc > 2) for (int t = 0; t < m; t++)               // 块 2: 该 96 宽块【所有行】精确 0 (事故最极端形状)
+            for (int j = 0; j < cs; j++) x[((size_t)t * nc + 2) * cs + j] = 0.f;
+        for (size_t i = 0; i < x.size(); i++) if ((i * 7) % 3 == 0) x[i] = -x[i];   // 含负值
+    }
+    if (mode == 1) for (size_t i = 0; i < x.size(); i++) x[i] = 0.f;
+    // ---- 主机参考: 与 vis.cpp 主机路径同式 (fabsf 逐块行 max → Mc 夹逼 → f = Mc/m, 行因子 = m*invMc) ----
+    for (int t = 0; t < m; t++) for (int c = 0; c < nc; c++) {
+        float am = 0;
+        for (int j = 0; j < cs; j++) { float a = fabsf(x[((size_t)t * nc + c) * cs + j]); if (a > am) am = a; }
+        refA[(size_t)t * nc + c] = am;
+    }
+    std::vector<float> Mcs(nc, 0.f);
+    for (int t = 0; t < m; t++) for (int c = 0; c < nc; c++) if (refA[(size_t)t * nc + c] > Mcs[c]) Mcs[c] = refA[(size_t)t * nc + c];
+    for (int c = 0; c < nc; c++) if (Mcs[c] <= 1e-30f) Mcs[c] = 1e-30f;                        // ★ 主机夹逼 Mc
+    for (int t = 0; t < m; t++) for (int c = 0; c < nc; c++) {
+        float mm = refA[(size_t)t * nc + c]; if (!(mm > 1e-30f)) mm = 1e-30f;                  // ★ 主机夹逼 mx
+        refF[(size_t)t * nc + c]  = Mcs[c] / mm;
+        refRf[(size_t)t * nc + c] = mm * (1.0f / Mcs[c]);
+    }
+    for (int t = 0; t < m; t++) for (int c = 0; c < nc; c++) for (int j = 0; j < cs; j++)
+        refAn[((size_t)t * nc + c) * cs + j] = x[((size_t)t * nc + c) * cs + j] * refF[(size_t)t * nc + c];
+    // ---- 卡上链 ----
+    DBuf dx, dmx, dmn, dmc, df, dinv, drf, dtr, dan, don, deps, dmg1;
+    dx.alloc(MK * 4); dmx.alloc((size_t)m * nc * 4); dmn.alloc((size_t)m * nc * 4);
+    dmc.alloc(nc * 4); df.alloc((size_t)m * nc * 4); dinv.alloc(nc * 4); drf.alloc((size_t)m * nc * 4);
+    dtr.alloc((size_t)m * nc * 4); dan.alloc(MK * 4); don.alloc(nc * 4); deps.alloc((size_t)m * nc * 4);
+    dmg1.alloc(nc * 4);
+    dx.up(x.data(), MK * 4);
+    { std::vector<float> ones(nc, 1.0f); don.up(ones.data(), nc * 4); }
+    { std::vector<float> eps((size_t)m * nc, 1e-30f); deps.up(eps.data(), (size_t)m * nc * 4); }
+    { std::vector<float> mg1(nc, -1.0f); dmg1.up(mg1.data(), nc * 4); }
+    Context ctx(Device(DeviceType::XPU1, 0));
+    int xd3[3] = {m, nc, cs}, rd2[1] = {2}, xd2[2] = {m, nc}, rd0[1] = {0}, sh[2] = {m, nc}, pm[2] = {1, 0};
+    int r = api::reduce(&ctx, (const float*)dx.p, (float*)dmx.p, xd3, 3, rd2, 1, REDUCE_MAX);
+    r |= api::reduce(&ctx, (const float*)dx.p, (float*)dmn.p, xd3, 3, rd2, 1, REDUCE_MIN);
+    r |= api::elementwise_mul_2d(&ctx, (const float*)dmn.p, (const float*)dmg1.p, (float*)dmn.p, m, nc, 1, nc);  // -minA
+    r |= api::elementwise_max_2d(&ctx, (const float*)dmx.p, (const float*)dmn.p, (float*)dmx.p, m, nc, m, nc);   // mxA = max|A|
+    r |= api::elementwise_max_2d(&ctx, (const float*)dmx.p, (const float*)deps.p, (float*)dmx.p, m, nc, m, nc);  // ★★ 夹逼
+    r |= api::reduce(&ctx, (const float*)dmx.p, (float*)dmc.p, xd2, 2, rd0, 1, REDUCE_MAX);                      // Mc (夹逼后)
+    r |= api::elementwise_div_2d(&ctx, (const float*)dmc.p, (const float*)dmx.p, (float*)df.p, 1, nc, m, nc);    // f = Mc/mx
+    r |= api::elementwise_div_2d(&ctx, (const float*)don.p, (const float*)dmc.p, (float*)dinv.p, 1, nc, 1, nc);  // 1/Mc
+    r |= api::elementwise_mul_2d(&ctx, (const float*)dmx.p, (const float*)dinv.p, (float*)drf.p, m, nc, 1, nc);  // 行因子
+    r |= api::transpose(&ctx, (const float*)drf.p, (float*)dtr.p, sh, pm, 2);
+    r |= api::elementwise_mul_2d(&ctx, (const float*)dx.p, (const float*)df.p, (float*)dan.p, m * nc, cs, m * nc, 1); // An = A*f
+    int ww = xpu_wait();
+    std::vector<float> cf((size_t)m * nc), crf((size_t)m * nc), can(MK);
+    df.down(cf.data(), (size_t)m * nc * 4); drf.down(crf.data(), (size_t)m * nc * 4); dan.down(can.data(), MK * 4);
+    int nf = 0, nbf = 0, nbrf = 0, nba = 0;
+    for (size_t i = 0; i < cf.size(); i++) if (!std::isfinite(cf[i])) nf++;
+    for (size_t i = 0; i < cf.size(); i++) if (cf[i] != refF[i]) nbf++;
+    for (size_t i = 0; i < crf.size(); i++) if (crf[i] != refRf[i]) nbrf++;
+    for (size_t i = 0; i < can.size(); i++) if (can[i] != refAn[i]) nba++;
+    printf("[probe]   夹逼链: r=%d wait=%d | 非有限值 nan/inf=%d (期望 0)\n", r, ww, nf);
+    printf("[probe]   f=Mc/mx 位不同 %d/%zu | 行因子 位不同 %d/%zu | An 位不同 %d/%zu (期望 0)\n",
+           nbf, cf.size(), nbrf, crf.size(), nba, can.size());
+    return (r == 0 && ww == 0 && nf == 0 && nbf == 0 && nbrf == 0 && nba == 0) ? 0 : 1;
+}
+
+int main(int argc, char** argv) {
+    const char* t = (argc > 1) ? argv[1] : "all";
+    int rc = 0;
+    if (!strcmp(t, "ln64"))   rc |= T_LN(2, 64);
+    if (!strcmp(t, "ln1024")) rc |= T_LN(4, 1024);
+    if (!strcmp(t, "ln1152")) rc |= T_LN(4, 1152);
+    if (!strcmp(t, "lnM"))    rc |= T_LN(256, 1152);
+    if (!strcmp(t, "lnF"))    rc |= T_LN(2304, 1152);
+    if (!strcmp(t, "gelu"))   rc |= T_GELU(1024);
+    if (!strcmp(t, "geluF"))  rc |= T_GELU(2304 * 4304 % 1000000 + 4304);
+    if (!strcmp(t, "ew"))     rc |= T_EW(8, 64);
+    if (!strcmp(t, "ewM"))    rc |= T_EW(256, 1152);
+    if (!strcmp(t, "softmax"))rc |= T_SOFTMAX(4, 64);
+    if (!strcmp(t, "softmaxM")) rc |= T_SOFTMAX(256, 256);
+    if (!strcmp(t, "reduce")) rc |= T_REDUCE(8, 4, 16);
+    if (!strcmp(t, "trans"))  rc |= T_TRANS(4, 8);
+    if (!strcmp(t, "red0"))   rc |= T_RED0(8, 4, 64);
+    if (!strcmp(t, "red0b"))  rc |= T_RED0(1, 4, 64);
+    if (!strcmp(t, "inpl"))   rc |= T_MUL2D_INPLACE(16, 64);
+    if (!strcmp(t, "div2d"))  rc |= T_DIV2D(8, 64);
+    if (!strcmp(t, "div2dM")) rc |= T_DIV2D(256, 1152);
+    if (!strcmp(t, "reddim0")) rc |= T_REDDIM0(64, 24);
+    if (!strcmp(t, "redmin3")) rc |= T_REDMIN3(8, 4, 16);
+    if (!strcmp(t, "addrow"))  rc |= T_ADDROW(8, 45);
+    if (!strcmp(t, "addrowM")) rc |= T_ADDROW(128, 4320);
+    if (!strcmp(t, "maxabs"))  rc |= T_MAXABS3(8, 4, 16);
+    if (!strcmp(t, "maxabsM")) rc |= T_MAXABS3(64, 45, 96);
+    if (!strcmp(t, "geluz"))   rc |= T_GELUZ(8, 96, 80);
+    if (!strcmp(t, "geluzM"))  rc |= T_GELUZ(64, 4320, 4304);
+    if (!strcmp(t, "divclampS")) rc |= T_DIVCLAMP(8, 4, 96, 0);     // 极小尺寸单发 (先跑这个)
+    if (!strcmp(t, "divclamp"))  rc |= T_DIVCLAMP(64, 45, 96, 0);   // 事故形状: 负值 + 部分行整块0 + 一块全0
+    if (!strcmp(t, "divclampZ")) rc |= T_DIVCLAMP(64, 45, 96, 1);   // 整个分区全 0 (最极端)
+    if (!strcmp(t, "divclampN")) rc |= T_DIVCLAMP(64, 45, 96, 2);   // 正常非负 (夹逼应零影响, 逐位相同)
+    if (!strcmp(t, "all")) {
+        rc |= T_LN(2, 64); rc |= T_LN(4, 1024); rc |= T_LN(4, 1152);
+        rc |= T_GELU(1024); rc |= T_EW(8, 64); rc |= T_SOFTMAX(4, 64);
+        rc |= T_REDUCE(8, 4, 16); rc |= T_TRANS(4, 8);
+    }
+    printf("[probe] ==== %s rc=%d ====\n", t, rc);
+    return rc;
+}

@@ -1,0 +1,64 @@
+// multibench.xpu — 分解 multi kernel 开销: 纯搬运 vs 搬运+计算
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+#define S_PER_HV (RPC * KHD)      // 1024 floats
+#define PACKED_PER_HV (2+KHD+KHD+VHD)  // 386
+
+// mode 0: 纯搬运 (只 GM2LM S + LM2GM S 回写, 无计算)
+// mode 1: 搬运 + 简单计算 (每行一个操作)
+// mode 2: 完整递推 (真实计算)
+__global__ void multi_bench(float *S, const float *packed, float *outT, int M, int mode) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;   
+    int r0 = cid * RPC;
+    __local__ float lr[RPC][KHD];
+    __local__ float pl[PACKED_PER_HV];
+    __local__ float ob[RPC];
+
+    for (int t = 0; t < M; t++) {
+        __global_ptr__ float *S_t = S + (size_t)t * NVH * VHD * KHD;
+        for (int hv = hstart; hv < hend; hv++) {
+            __global_ptr__ float *sp = S_t + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+            GM2LM(sp, lr, S_PER_HV * 4);   // 4KB
+            GM2LM(packed + ((size_t)t * NVH + hv) * PACKED_PER_HV, pl, PACKED_PER_HV * 4);
+            if (mode == 0) {
+                // 纯搬运: 不做计算, 直接回写
+            } else if (mode == 1) {
+                for (int rr = 0; rr < RPC; rr++) {
+                    float s = 0;
+                    for (int i = 0; i < KHD; i++) s += lr[rr][i];
+                    ob[rr] = s;
+                }
+            } else {
+                float eg = pl[0], bb = pl[1];
+                const float *kp = pl + 2, *qp = pl + 2 + KHD, *vp = pl + 2 + KHD + KHD;
+                for (int rr = 0; rr < RPC; rr++) {
+                    float sk = 0.f;
+                    for (int i = 0; i < KHD; i++) { float a0 = lr[rr][i]*eg; lr[rr][i]=a0; sk += a0*kp[i]; }
+                    float d = (vp[r0+rr] - sk) * bb;
+                    float so = 0.f;
+                    for (int i = 0; i < KHD; i++) { float a0 = lr[rr][i]+kp[i]*d; lr[rr][i]=a0; so += a0*qp[i]; }
+                    ob[rr] = so;
+                }
+            }
+            LM2GM(lr, sp, S_PER_HV * 4);
+            LM2GM(ob, outT + ((size_t)t * NVH + hv) * VHD + r0, RPC * 4);
+        }
+    }
+}
+
+void run_multi_bench(int clusters, int cores, int M, float *S, const float *packed, float *outT, int mode) {
+    multi_bench<<<clusters, cores>>>(S, packed, outT, M, mode);
+}

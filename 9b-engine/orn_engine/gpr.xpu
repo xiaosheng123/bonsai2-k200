@@ -1,0 +1,8 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+// Test: _global_ptr_ params on kernel. Does the device compiler mangle differently?
+__global__ void gpr_k(_global_ptr_ const int *in, _global_ptr_ int *out, int n) {
+    int tid = core_id();
+    if (tid < n) out[tid] = in[tid];
+}
+void run_gpr(_global_ptr_ const int *in, _global_ptr_ int *out, int n) { gpr_k<<<1, 32>>>(in, out, n); }

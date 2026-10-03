@@ -1,0 +1,27 @@
+// lcl_size.xpu — 测每核 __local__ 容量: 不同大小数组的读写速度
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// size 是 __local__ float 数组的元素数
+__global__ void lcl_touch(float *dst, int size, int loops) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    __local__ float buf[32768];  // 最多 128KB
+    int tid = cl * 16 + cid;
+    // 初始化
+    for (int i = 0; i < size; i++) buf[i] = (float)i;
+    float s = 0;
+    for (int it = 0; it < loops; it++) {
+        // 读整个数组 2 次 (模拟计算访存)
+        for (int i = 0; i < size; i++) s += buf[i];
+        for (int i = 0; i < size; i++) s += buf[i] * 1.0001f;
+    }
+    // 防止优化
+    LM2GM(&s, dst + tid, 4);
+}
+
+void run_lcl_touch(int clusters, int cores, int size, int loops, float *dst) {
+    lcl_touch<<<clusters, cores>>>(dst, size, loops);
+}

@@ -1,0 +1,55 @@
+// async_test.xpu — 验证 GM2LM_ASYNC + mfence 语义
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+#include <cstdio>
+
+// 每个核: async 读 4KB, mfence, 写回 (验证数据是否真的传到 local)
+__global__ void async_verify(float *src, float *dst) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    int tid = cl * 16 + cid;
+    __local__ float buf[1024];   // 4KB
+    GM2LM_ASYNC(src + (size_t)tid * 1024, buf, 4096);
+    mfence();
+    // 求和写回 (真实数据 => 不被优化)
+    float s = 0;
+    for (int i = 0; i < 1024; i++) s += buf[i] * 1.0001f;
+    LM2GM(&s, dst + tid, 4);
+}
+
+void run_async_verify(int clusters, int cores, float *src, float *dst) {
+    async_verify<<<clusters, cores>>>(src, dst);
+}
+
+int main() {
+    int nslots = 16 * 8;
+    float *d_src = nullptr, *d_dst = nullptr;
+    xpu_malloc((void**)&d_src, (size_t)nslots*1024*4);
+    xpu_malloc((void**)&d_dst, (size_t)nslots*4);
+    std::vector<float> h((size_t)nslots*1024);
+    srand(5);
+    for (auto &x : h) x = (rand()%2000-1000)/1000.0f;
+
+    xpu_memcpy(d_src, h.data(), h.size()*4, XPU_HOST_TO_DEVICE);
+    xpu_wait();
+    run_async_verify(8, 16, d_src, d_dst);
+    xpu_wait();
+    std::vector<float> r(nslots);
+    xpu_memcpy(r.data(), d_dst, nslots*4, XPU_DEVICE_TO_HOST);
+    xpu_wait();
+
+    // 检查: 每核 buf 和 = sum of h[tid*1024..]
+    float maxerr = 0;
+    for (int t = 0; t < nslots; t++) {
+        double s = 0;
+        for (int i = 0; i < 1024; i++) s += h[(size_t)t*1024+i];
+        float expect = (float)s * 1.0001f;
+        float e = fabsf(r[t] - expect);
+        if (e > maxerr) maxerr = e;
+    }
+    printf("ASYNC verify: maxerr=%.4f %s\n", maxerr, maxerr < 0.5f ? "PASS" : "FAIL");
+    printf("样本: tid0 got=%f\n", r[0]);
+    return 0;
+}

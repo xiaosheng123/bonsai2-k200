@@ -1,0 +1,21 @@
+// gm_single.xpu — 最简: 每核搬固定 1024 floats, 求和写回. 已知确定性输入.
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+__global__ void gm_single(float *src, float *dst) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    __local__ float buf[1024];
+    __global_ptr__ float *sp = src + (size_t)cl * 1024;   // 每 cl 读同一 4KB
+    GM2LM(sp, buf, 4096);
+    float s = 0;
+    for (int i = 0; i < 1024; i++) s += buf[i] * 1.0001f;
+    __global_ptr__ float *dp = dst + cl * 16 + cid;
+    LM2GM(&s, dp, 4);
+}
+
+void run_gm_single(int clusters, int cores, float *src, float *dst) {
+    gm_single<<<clusters, cores>>>(src, dst);
+}

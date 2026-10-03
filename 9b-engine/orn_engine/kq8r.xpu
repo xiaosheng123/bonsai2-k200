@@ -1,0 +1,84 @@
+// kq8r.xpu — 多行批量搬运版 int8 GEMV (专治"每次搬运 4352B 交 4.4µs 固定开销")
+//
+// 动机 (实测): V2 内核每行搬 4352B 交一次固定开销 => 每簇只有 0.68 GB/s;
+//   非V2 每行 4 次 1088B 搬运 => 0.88/4 = 每簇 0.22 GB/s。耗时 ≈ 搬运次数, 不是字节数。
+// 做法: N==4096 时 V2 布局的一行恰好是一个 4352B 段, 连续多行在显存里就是连续的,
+//   所以把 RB 行的权重用【一次 GM2LM】搬进 LM, 固定开销被摊薄 RB 倍。
+// 约束: 只对 N==4096 生效 (N=12288 的 ffn_down 一行 3 段, 行间不连续, 走老 V2 内核)。
+//   RB 由 -DRB= 指定; LM 需求 = RB*4352 + 4096(lx) + 512(lxs) + 4*RB(lacc) 字节/核。
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#ifndef RB
+#define RB 2
+#endif
+#define HW_CORE 16
+#define KQ8R_TID (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define KQ8R_NT  (cluster_num() * HW_CORE)
+#define R_ST     4352        // N=4096 时的一行字节 (4096 int8 + 128 fp16 scale)
+#define R_KC     4096
+
+#define R_D(p) ({ unsigned short hh__ = *(const unsigned short *)(p); \
+    unsigned s__ = (unsigned)(hh__ & 0x8000) << 16; \
+    int e__ = (hh__ >> 10) & 0x1f; unsigned m__ = hh__ & 0x3ff, u__; \
+    if (e__ == 0) { if (!m__) u__ = s__; else { int sh__ = 0; while (!(m__ & 0x400)) { m__ <<= 1; sh__++; } m__ &= 0x3ff; \
+                   u__ = s__ | ((unsigned)(127 - 15 - sh__) << 23) | (m__ << 13); } } \
+    else if (e__ == 31) u__ = s__ | 0x7f800000u | (m__ << 13); \
+    else u__ = s__ | ((unsigned)(e__ - 15 + 127) << 23) | (m__ << 13); \
+    float f__; __builtin_memcpy(&f__, &u__, 4); f__; })
+
+__global__ void gemv_q8v2r_k(const unsigned char *W, const unsigned char *xq, const float *xs, float *y, int M, int N) {
+    __local__ unsigned char lw[RB * R_ST];       // RB 行权重: 连续 RB*4352 字节
+    __local__ unsigned char lx[R_KC];            // 激活 int8
+    __local__ float lxs[R_KC / 32];              // 激活 scale
+    __local__ float lacc[RB];                    // 本批 RB 行的累加器
+    // ---- 完整边界检查 (launch 前已由主机核对; 内核再兜一道) ----
+    if (N != R_KC || M <= 0) { __local__ float z[1]; z[0] = 0.f; LM2GM(z, y, 4); return; }
+    int tid = KQ8R_TID, nthr = KQ8R_NT;
+    int ngrp = (M + RB - 1) / RB;
+    int per = (ngrp + nthr - 1) / nthr;
+    int g0 = tid * per;
+    if (g0 >= ngrp) return;
+    int g1 = g0 + per; if (g1 > ngrp) g1 = ngrp;
+    GM2LM(xq, lx, R_KC);
+    GM2LM(xs, lxs, (R_KC / 32) * 4);
+    const int *x32 = (const int *)lx;
+    for (int g = g0; g < g1; g++) {
+        int m0 = g * RB;
+        int nr = (M - m0 < RB) ? (M - m0) : RB;
+        for (int i = 0; i < nr; i++) lacc[i] = 0.f;
+        if (nr == RB) {
+            GM2LM(W + (long long)m0 * R_ST, lw, RB * R_ST);       // ★ 一次搬运 RB 行
+        } else {
+            for (int i = 0; i < nr; i++) GM2LM(W + (long long)(m0 + i) * R_ST, lw + i * R_ST, R_ST);
+        }
+        for (int i = 0; i < nr; i++) {
+            const int *qp = (const int *)(lw + i * R_ST);
+            const unsigned short *sc = (const unsigned short *)(lw + i * R_ST + R_KC);
+            float fa = 0.f;
+            for (int b = 0; b < R_KC / 32; b++) {
+                const int *p = qp + b * 8;
+                const int *q = x32 + b * 8;
+                int a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+                for (int k = 0; k < 8; k += 2) {
+                    int A0 = p[k], A1 = p[k + 1], B0 = q[k], B1 = q[k + 1];
+                    a0 += (A0 << 24 >> 24) * (B0 << 24 >> 24);
+                    a1 += (A0 << 16 >> 24) * (B0 << 16 >> 24);
+                    a2 += (A0 <<  8 >> 24) * (B0 <<  8 >> 24);
+                    a3 += (A0 >> 24)        * (B0 >> 24);
+                    a0 += (A1 << 24 >> 24) * (B1 << 24 >> 24);
+                    a1 += (A1 << 16 >> 24) * (B1 << 16 >> 24);
+                    a2 += (A1 <<  8 >> 24) * (B1 <<  8 >> 24);
+                    a3 += (A1 >> 24)        * (B1 >> 24);
+                }
+                fa += (float)(a0 + a1 + a2 + a3) * (R_D(sc + b) * lxs[b]);
+            }
+            lacc[i] = fa;
+        }
+        LM2GM(lacc, y + m0, nr * 4);
+    }
+}
+void run_gemv_q8v2r(int cl, int co, const void *W, const void *xq, const void *xs, void *y, int M, int N) {
+    gemv_q8v2r_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)xq, (const float *)xs, (float *)y, M, N);
+}

@@ -1,0 +1,12 @@
+【子代理协作说明 / coordination note】
+时间: 2026-09-20 ~17:00 (VM 时间)
+
+本目录 /home/caden/orn_engine/ 的 orn 是 **Q8_0 主目标引擎**（任务书指定:
+/home/caden/orn/Ornith-1.5-9B-Q8_0.gguf, qwen35 混合架构, 双芯分层 8.85GiB 常驻）。
+
+- 启动: K200_ENGINE=/home/caden/orn_engine/orn K200_MODEL_PATH=/home/caden/orn/Ornith-1.5-9B-Q8_0.gguf \
+        K200_PORT=8090 K200_MODEL=ornith-1.5-9b-k200 K200_NGEN=64 python3 /home/caden/k200llm/server.py
+- 已修复: 整模型坏区根因 = kq8 GEMV 内核用 core_num()(=申请值)算线程数, 而硬件每 cluster 只有 16 个核
+  真正执行 ⇒ co>16 时 7/8 的行从不写入(哨兵法定位)。修法: HW_CORE=16 固定 + 启动 co=16。
+- 若要跑别的引擎(k200llm/orn Q5 等), 请先 kill /home/caden/orn_engine/orn, 否则两芯 HBM 会互挤。
+- 搞坏了用 ./restore_nosudo.sh 恢复旧 MiniCPM 服务(8090/8091/8092)。

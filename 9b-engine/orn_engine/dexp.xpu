@@ -1,0 +1,10 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+__global__ void dexp_k(const float *in, float *out) {
+    __local__ float l[32], m[32];
+    GM2LM(in, l, 128);
+    for (int i = 0; i < 32; i++) m[i] = exp(l[i]);
+    LM2GM(m, out, 128);
+}
+void run_dexp(const float *in, float *out) { dexp_k<<<1, 16>>>(in, out); }

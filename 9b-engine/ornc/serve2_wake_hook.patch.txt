@@ -1,0 +1,13 @@
+# serve2_wake_hook.patch (第28章, 可选)
+# 作用: 睡眠中收到请求 -> 后台拉起 wake.sh -> 走既有 _wait_ready() 排队等 ready(不 503)。
+# 位置: /home/caden/ornc/serve2.py 的 class Engine 的 _wait_ready() 开头 (约 375 行)
+#
+#   def _wait_ready(self, maxt=None):
+# +     # ★ 第28章 空闲休眠唤醒钩子: 睡眠中第一个请求把卡叫醒(后台), 然后照旧排队等 ready
+# +     if os.path.exists("/home/caden/ornc/.idle_asleep") and not getattr(self, "_waking", False):
+# +         self._waking = True
+# +         subprocess.Popen(["/bin/bash", "/home/caden/ornc/wake.sh", "--bg"])
+#       # ★ WAITREADY: 未就绪时【排队等待】而不是回 503。
+#
+# 注意: 该钩子只对「服务进程还在(仅引擎睡)」的 L1 变体有效。若 LEVEL=L1 连 serve2.py 一起停,
+#       8090 无人监听, 必须外部(人工/上层中转站重试)调用 wake.sh。

@@ -1,0 +1,28 @@
+// async_kern2.xpu — 纯 device: GM2LM 大小限制测试 (4KB vs 16KB)
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// mode 0: 4KB 一次, mode 1: 16KB 一次
+__global__ void gm_size_test(float *src, float *dst, int mode) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    int tid = cl * 16 + cid;
+    __local__ float buf[4096];   // 16KB max
+    float s = 0;
+    if (mode == 0) {
+        for (int b = 0; b < 4; b++) {
+            GM2LM(src + (size_t)tid * 4096 + (size_t)b * 1024, buf + b * 1024, 4096);
+        }
+        for (int i = 0; i < 4096; i++) s += buf[i] * 1.0001f;
+    } else {
+        GM2LM(src + (size_t)tid * 4096, buf, 16384);
+        for (int i = 0; i < 4096; i++) s += buf[i] * 1.0001f;
+    }
+    LM2GM(&s, dst + tid, 4);
+}
+
+void run_gm_size_test(int clusters, int cores, int mode, float *src, float *dst) {
+    gm_size_test<<<clusters, cores>>>(src, dst, mode);
+}

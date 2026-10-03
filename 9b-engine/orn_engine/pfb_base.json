@@ -1,0 +1,229 @@
+{
+ "tag": "base1024",
+ "engine": "/home/caden/orn_engine/orn3",
+ "engine_md5": "24a925107d44a9b73174147927d93f78",
+ "meta": {
+  "n14": 14,
+  "chars14": 5742,
+  "kept900": 3,
+  "kept1700": 5,
+  "est900": 674,
+  "est1700": 1640
+ },
+ "ready": true,
+ "startup_s": 75.3,
+ "items": [
+  {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "raw": "你好！有什么我可以帮你的吗？😊",
+   "wall": 1.46,
+   "prompt_tok": 13,
+   "reused": 0,
+   "ms_per_tok": 62.8,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=13 tok 用时 0.82s (62.8 ms/tok, 全量 复用0 tok) | 生成 9 tok 用时 0.53s = 17.052 tok/s | gemv 2838 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 9 tok 0.53s = 58.64 ms/tok | 卡gemm 38.95 ms (1161 次, 批量 0) | 主机 19.42 ms: 嵌入0.45 归一化+launch0.50 SSM13.23[conv1.17 delta-net6.63 gate-norm0.71 alpha/beta4.68 SSM其余0.04] 注意力1.44 层内其余3.79 lm_head0.01 | argmax+解码+其余 0.27",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.50 ms | launch 1.29 ms | 等卡(wait) 28.96 ms | D2H 3.76 ms || 合计 37.52 ms (调用 2322 次, 0.145 ms/次, 其中每次 launch 0.0050 ms)"
+   ],
+   "name": "golden",
+   "max_tokens": 24
+  },
+  {
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "raw": "你好！有什么我可以帮你的吗？😊",
+   "wall": 0.56,
+   "prompt_tok": 13,
+   "reused": 13,
+   "ms_per_tok": 0.0,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=13 tok 用时 0.00s (0.0 ms/tok, 快照 复用13 tok) | 生成 9 tok 用时 0.54s = 16.620 tok/s | gemv 3999 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 9 tok 0.54s = 60.17 ms/tok | 卡gemm 39.21 ms (1161 次, 批量 0) | 主机 20.70 ms: 嵌入0.02 归一化+launch0.50 SSM14.02[conv1.44 delta-net6.97 gate-norm0.52 alpha/beta5.04 SSM其余0.05] 注意力1.61 层内其余4.55 lm_head0.01 | argmax+解码+其余 0.25",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.49 ms | launch 1.34 ms | 等卡(wait) 29.06 ms | D2H 3.82 ms || 合计 37.72 ms (调用 2322 次, 0.146 ms/次, 其中每次 launch 0.0052 ms)"
+   ],
+   "name": "q1",
+   "max_tokens": 64
+  },
+  {
+   "text": "1+1 等于 **2**。\n\n这是一个最基本的数学运算，把 1 和 1 加起来，结果就是 2。😊",
+   "raw": "1+1 等于 **2**。\n\n这是一个最基本的数学运算，把 1 和 1 加起来，结果就是 2。😊",
+   "wall": 2.26,
+   "prompt_tok": 17,
+   "reused": 0,
+   "ms_per_tok": 25.0,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=17 tok 用时 0.43s (25.0 ms/tok, 全量 复用0 tok) | 生成 30 tok 用时 1.81s = 16.548 tok/s | gemv 7870 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 30 tok 1.81s = 60.43 ms/tok | 卡gemm 39.12 ms (3870 次, 批量 0) | 主机 21.05 ms: 嵌入0.22 归一化+launch0.49 SSM15.35[conv1.82 delta-net7.31 gate-norm0.78 alpha/beta5.40 SSM其余0.04] 注意力1.58 层内其余3.39 lm_head0.01 | argmax+解码+其余 0.26",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.47 ms | launch 1.31 ms | 等卡(wait) 29.07 ms | D2H 3.77 ms || 合计 37.62 ms (调用 7740 次, 0.146 ms/次, 其中每次 launch 0.0051 ms)"
+   ],
+   "name": "q2",
+   "max_tokens": 64
+  },
+  {
+   "text": "光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生在植物细胞的叶绿体中，需要叶绿素等色素来捕获光能。\n\n简单来说，光合作用就是植物\"吃光\"的过程，它不仅是植物制造",
+   "raw": "光合作用是绿色植物、藻类和某些细菌利用光能，将二氧化碳和水转化为有机物（如葡萄糖）并释放氧气的过程。\n\n这个过程主要发生在植物细胞的叶绿体中，需要叶绿素等色素来捕获光能。\n\n简单来说，光合作用就是植物\"吃光\"的过程，它不仅是植物制造",
+   "wall": 4.42,
+   "prompt_tok": 18,
+   "reused": 0,
+   "ms_per_tok": 23.7,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=18 tok 用时 0.43s (23.7 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.97s = 16.108 tok/s | gemv 15998 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 64 tok 3.97s = 62.08 ms/tok | 卡gemm 39.35 ms (8127 次, 批量 0) | 主机 22.45 ms: 嵌入0.32 归一化+launch0.51 SSM15.80[conv1.63 delta-net7.51 gate-norm1.16 alpha/beta5.45 SSM其余0.05] 注意力1.97 层内其余3.83 lm_head0.01 | argmax+解码+其余 0.29",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.47 ms | launch 1.40 ms | 等卡(wait) 28.96 ms | D2H 3.87 ms || 合计 37.71 ms (调用 16254 次, 0.148 ms/次, 其中每次 launch 0.0055 ms)"
+   ],
+   "name": "q3",
+   "max_tokens": 64
+  },
+  {
+   "text": "The weather is nice today, let's go for a walk.\n\n这句话可以有不同的翻译方式，比如：\n\n- \"The weather is nice today, let's go out for a walk.\"\n- \"It's a nice day out, let's go for a walk.\"\n- \"The weather is so nice",
+   "raw": "The weather is nice today, let's go for a walk.\n\n这句话可以有不同的翻译方式，比如：\n\n- \"The weather is nice today, let's go out for a walk.\"\n- \"It's a nice day out, let's go for a walk.\"\n- \"The weather is so nice",
+   "wall": 4.51,
+   "prompt_tok": 25,
+   "reused": 0,
+   "ms_per_tok": 23.7,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=25 tok 用时 0.59s (23.7 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.90s = 16.422 tok/s | gemv 24126 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 64 tok 3.90s = 60.90 ms/tok | 卡gemm 39.21 ms (8127 次, 批量 0) | 主机 21.44 ms: 嵌入0.18 归一化+launch0.49 SSM14.54[conv1.50 delta-net7.54 gate-norm0.98 alpha/beta4.46 SSM其余0.05] 注意力2.33 层内其余3.89 lm_head0.01 | argmax+解码+其余 0.25",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.43 ms | launch 1.36 ms | 等卡(wait) 29.10 ms | D2H 3.80 ms || 合计 37.68 ms (调用 16254 次, 0.148 ms/次, 其中每次 launch 0.0053 ms)"
+   ],
+   "name": "q4",
+   "max_tokens": 64
+  },
+  {
+   "text": "```python\ndef max_index(nums):\n    return nums.index(max(nums))\n```",
+   "raw": "```python\ndef max_index(nums):\n    return nums.index(max(nums))\n```",
+   "wall": 2.08,
+   "prompt_tok": 32,
+   "reused": 0,
+   "ms_per_tok": 28.2,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=32 tok 用时 0.90s (28.2 ms/tok, 全量 复用0 tok) | 生成 18 tok 用时 1.16s = 15.511 tok/s | gemv 26449 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 18 tok 1.16s = 64.47 ms/tok | 卡gemm 39.60 ms (2322 次, 批量 0) | 主机 24.60 ms: 嵌入0.32 归一化+launch0.50 SSM17.69[conv2.01 delta-net8.75 gate-norm0.94 alpha/beta5.95 SSM其余0.05] 注意力2.01 层内其余4.07 lm_head0.01 | argmax+解码+其余 0.27",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.51 ms | launch 1.41 ms | 等卡(wait) 29.28 ms | D2H 3.81 ms || 合计 38.00 ms (调用 4644 次, 0.147 ms/次, 其中每次 launch 0.0055 ms)"
+   ],
+   "name": "q5",
+   "max_tokens": 64
+  },
+  {
+   "text": "# 季度税务报告检查清单\n\n以下是5条关键检查项，帮助你确保报告准确完整：\n\n## 1. 收入与发票核对\n- 确认所有季度收入已入账\n- 核对发票号码、日期、金额是否连续无遗漏\n- 检查是否有未开票收入被遗漏",
+   "raw": "# 季度税务报告检查清单\n\n以下是5条关键检查项，帮助你确保报告准确完整：\n\n## 1. 收入与发票核对\n- 确认所有季度收入已入账\n- 核对发票号码、日期、金额是否连续无遗漏\n- 检查是否有未开票收入被遗漏",
+   "wall": 4.59,
+   "prompt_tok": 26,
+   "reused": 0,
+   "ms_per_tok": 27.8,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=26 tok 用时 0.72s (27.8 ms/tok, 全量 复用0 tok) | 生成 64 tok 用时 3.84s = 16.651 tok/s | gemv 34577 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 64 tok 3.84s = 60.06 ms/tok | 卡gemm 38.65 ms (8127 次, 批量 0) | 主机 21.15 ms: 嵌入0.19 归一化+launch0.48 SSM14.98[conv1.63 delta-net7.22 gate-norm0.75 alpha/beta5.33 SSM其余0.05] 注意力2.04 层内其余3.45 lm_head0.01 | argmax+解码+其余 0.26",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.46 ms | launch 1.32 ms | 等卡(wait) 28.69 ms | D2H 3.69 ms || 合计 37.16 ms (调用 16254 次, 0.146 ms/次, 其中每次 launch 0.0052 ms)"
+   ],
+   "name": "q6",
+   "max_tokens": 64
+  },
+  {
+   "text": "7",
+   "raw": "7",
+   "wall": 11.72,
+   "prompt_tok": 421,
+   "reused": 0,
+   "ms_per_tok": 27.3,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=421 tok 用时 11.48s (27.3 ms/tok, 全量 复用0 tok) | 生成 1 tok 用时 0.07s = 15.051 tok/s | gemv 34713 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 1 tok 0.07s = 66.44 ms/tok | 卡gemm 38.86 ms (129 次, 批量 0) | 主机 26.98 ms: 嵌入0.02 归一化+launch0.48 SSM12.26[conv0.90 delta-net5.72 gate-norm0.41 alpha/beta5.18 SSM其余0.04] 注意力12.07 层内其余2.15 lm_head0.01 | argmax+解码+其余 0.60",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.46 ms | launch 1.30 ms | 等卡(wait) 29.00 ms | D2H 3.65 ms || 合计 37.42 ms (调用 258 次, 0.145 ms/次, 其中每次 launch 0.0050 ms)"
+   ],
+   "name": "long14_trim900",
+   "max_tokens": 32
+  },
+  {
+   "text": "7",
+   "raw": "7",
+   "wall": 35.23,
+   "prompt_tok": 1002,
+   "reused": 0,
+   "ms_per_tok": 34.5,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=1002 tok 用时 34.56s (34.5 ms/tok, 全量 复用0 tok) | 生成 1 tok 用时 0.10s = 9.713 tok/s | gemv 34858 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 1 tok 0.10s = 102.96 ms/tok | 卡gemm 41.52 ms (129 次, 批量 0) | 主机 60.99 ms: 嵌入0.03 归一化+launch0.58 SSM21.04[conv1.10 delta-net8.62 gate-norm0.47 alpha/beta10.78 SSM其余0.06] 注意力35.96 层内其余3.37 lm_head0.01 | argmax+解码+其余 0.45",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.77 ms | launch 1.46 ms | 等卡(wait) 30.05 ms | D2H 4.48 ms || 合计 39.77 ms (调用 258 次, 0.154 ms/次, 其中每次 launch 0.0057 ms)"
+   ],
+   "name": "long14_trim1700",
+   "max_tokens": 32
+  },
+  {
+   "text": "",
+   "raw": "",
+   "wall": 39.07,
+   "prompt_tok": 1024,
+   "reused": 0,
+   "ms_per_tok": 34.9,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=1024 tok 用时 35.78s (34.9 ms/tok, 全量 复用0 tok) | 生成 0 tok 用时 0.00s = 0.000 tok/s | gemv 34874 次",
+   "pprof": [],
+   "prof": [],
+   "name": "long14_raw",
+   "max_tokens": 32
+  },
+  {
+   "text": "11",
+   "raw": "11",
+   "wall": 26.77,
+   "prompt_tok": 806,
+   "reused": 0,
+   "ms_per_tok": 32.5,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=806 tok 用时 26.23s (32.5 ms/tok, 全量 复用0 tok) | 生成 2 tok 用时 0.18s = 11.075 tok/s | gemv 35145 次",
+   "pprof": [],
+   "prof": [
+    "[orn][PROF] 2 tok 0.18s = 90.30 ms/tok | 卡gemm 39.85 ms (258 次, 批量 0) | 主机 50.11 ms: 嵌入0.03 归一化+launch0.55 SSM18.43[conv1.05 delta-net9.09 gate-norm2.29 alpha/beta5.95 SSM其余0.05] 注意力24.98 层内其余6.12 lm_head0.01 | argmax+解码+其余 0.33",
+    "[orn][PROF] ★ 卡 gemm 四段/token: H2D 3.62 ms | launch 1.39 ms | 等卡(wait) 29.01 ms | D2H 4.11 ms || 合计 38.13 ms (调用 516 次, 0.148 ms/次, 其中每次 launch 0.0054 ms)"
+   ],
+   "name": "plain1400",
+   "max_tokens": 24
+  },
+  {
+   "text": "",
+   "raw": "",
+   "wall": 36.71,
+   "prompt_tok": 1024,
+   "reused": 0,
+   "ms_per_tok": 35.2,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=1024 tok 用时 36.04s (35.2 ms/tok, 全量 复用0 tok) | 生成 0 tok 用时 0.00s = 0.000 tok/s | gemv 35161 次",
+   "pprof": [],
+   "prof": [],
+   "name": "plain1900",
+   "max_tokens": 24
+  },
+  {
+   "text": "",
+   "raw": "",
+   "wall": 41.37,
+   "prompt_tok": 1024,
+   "reused": 0,
+   "ms_per_tok": 37.3,
+   "finish": "?",
+   "prefill_line": "[orn] prompt=1024 tok 用时 38.16s (37.3 ms/tok, 全量 复用0 tok) | 生成 0 tok 用时 0.00s = 0.000 tok/s | gemv 35177 次",
+   "pprof": [],
+   "prof": [],
+   "name": "sess_a",
+   "max_tokens": 24
+  }
+ ]
+}

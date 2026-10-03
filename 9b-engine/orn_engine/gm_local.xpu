@@ -1,0 +1,30 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// 4 档 local 预算探测: 各 kernel 占用指定 KB 的 __local__, 跑 GM2LM 256 次看崩不崩
+__global__ void gk6144(float *src, long *sink, int N) {
+    __local__ float buf[1536];      // 6144 B
+    for (int i = 0; i < N; i++) GM2LM(src, buf, 64);
+    if (core_id() == 0 && cluster_id() == 0) *sink = 1;
+}
+__global__ void gk6656(float *src, long *sink, int N) {
+    __local__ float buf[1664];      // 6656 B
+    for (int i = 0; i < N; i++) GM2LM(src, buf, 64);
+    if (core_id() == 0 && cluster_id() == 0) *sink = 1;
+}
+__global__ void gk7168(float *src, long *sink, int N) {
+    __local__ float buf[1792];      // 7168 B
+    for (int i = 0; i < N; i++) GM2LM(src, buf, 64);
+    if (core_id() == 0 && cluster_id() == 0) *sink = 1;
+}
+__global__ void gk7680(float *src, long *sink, int N) {
+    __local__ float buf[1920];      // 7680 B
+    for (int i = 0; i < N; i++) GM2LM(src, buf, 64);
+    if (core_id() == 0 && cluster_id() == 0) *sink = 1;
+}
+
+void run_gk6144(float *s, long *k, int cl, int co, int N) { gk6144<<<cl, co>>>(s, k, N); }
+void run_gk6656(float *s, long *k, int cl, int co, int N) { gk6656<<<cl, co>>>(s, k, N); }
+void run_gk7168(float *s, long *k, int cl, int co, int N) { gk7168<<<cl, co>>>(s, k, N); }
+void run_gk7680(float *s, long *k, int cl, int co, int N) { gk7680<<<cl, co>>>(s, k, N); }

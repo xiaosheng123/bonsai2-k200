@@ -1,0 +1,119 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// ============================================================================
+// K200 Q4-per-row int4 GEMV  (第33轮: 为「卡上存 int4」写, 权重字节数减半)
+//
+//   权重布局 (per-output-row 对称 int4 + 每行一个 float scale):
+//     行 m = [ N/2 字节 int4 打包 ][ 4 字节 float row_scale ]
+//     行步长 rowstride = N/2 + 4
+//     4bit 存的是 (v+8): 低 nibble = 偶数列, 高 nibble = 奇数列
+//
+//   激活 x: int8 量化 (每 32 元素一个 float scale), int32 累加
+//     acc = sum_i int4(w_i) * int8(x_i)   每 32 一组
+//     out = sum_over_groups( acc * sx[g] ) * row_scale
+//
+//   ★ XPU 约束 (踩过): 全局指针是 address_space(1), 不能存进普通指针变量,
+//     也不能用普通解引用读 global; 一切 global 读取必须走 GM2LM (或内联表达式)。
+// ============================================================================
+#define Q4_E   2048          // 每次处理元素数 (local: 权重 1024B + 激活 2048B)
+#define Q4_RB  128           // 行块大小
+#define Q4_AS  32            // 激活量化块 (与 q8 路径一致)
+
+#define HW_CORE 16
+#define KQ4_TID  (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define KQ4_NT   (cluster_num() * HW_CORE)
+
+#define Q4_S(b) (((int)(b) & 0x0F) - 8)     // 低 nibble -> 偶数列
+#define Q4_T(b) (((int)(b) >> 4) - 8)       // 高 nibble -> 奇数列
+
+__global__ void gemv_q4_i8_k(const unsigned char *W, const unsigned char *xq,
+                             const float *xs, float *y, int M, int N) {
+    int tid  = KQ4_TID;
+    int nthr = KQ4_NT;
+    __local__ signed char   lx[Q4_E];
+    __local__ unsigned char lw[Q4_E / 2];
+    __local__ float         lxs[Q4_E / Q4_AS];
+    __local__ float         lacc[Q4_RB];
+    __local__ float         lsw[1];
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per;
+    if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int n2 = N >> 1;
+    long rowstride = (long)n2 + 4;
+    for (int mb = m0; mb < m1; mb += Q4_RB) {
+        int me = mb + Q4_RB; if (me > m1) me = m1;
+        int nrow = me - mb;
+        for (int i = 0; i < nrow; i++) lacc[i] = 0.f;
+        for (int j = 0; j < N; j += Q4_E) {
+            int nj = (N - j < Q4_E) ? (N - j) : Q4_E;
+            int nab = nj / Q4_AS;
+            GM2LM(xq + j, (unsigned char *)lx, nj);
+            GM2LM(xs + (j / Q4_AS), lxs, nab * 4);
+            for (int m = mb; m < me; m++) {
+                GM2LM(W + (long)m * rowstride + n2, (unsigned char *)lsw, 4);
+                GM2LM(W + (long)m * rowstride + (j >> 1), lw, nj >> 1);
+                float a = lacc[m - mb];
+                for (int b = 0; b < nab; b++) {
+                    int acc = 0;
+                    const unsigned char *wp = lw + ((b * Q4_AS) >> 1);
+                    const signed char   *xp = lx + b * Q4_AS;
+                    for (int i = 0; i < Q4_AS; i += 2) {
+                        unsigned char bb = wp[i >> 1];
+                        acc += Q4_S(bb) * (int)xp[i];
+                        acc += Q4_T(bb) * (int)xp[i + 1];
+                    }
+                    a += (float)acc * lxs[b];
+                }
+                lacc[m - mb] = a * lsw[0];
+            }
+        }
+        LM2GM(lacc, y + mb, nrow * 4);
+    }
+}
+
+// 变体: 激活为 fp32 (精度基准 / 非量化路径)
+__global__ void gemv_q4_f32_k(const unsigned char *W, const float *x,
+                              float *y, int M, int N) {
+    int tid  = KQ4_TID;
+    int nthr = KQ4_NT;
+    __local__ float         lx[Q4_E];
+    __local__ unsigned char lw[Q4_E / 2];
+    __local__ float         lsw[1];
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per;
+    if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int n2 = N >> 1;
+    long rowstride = (long)n2 + 4;
+    for (int m = m0; m < m1; m++) {
+        GM2LM(W + (long)m * rowstride + n2, (unsigned char *)lsw, 4);
+        float a = 0.f;
+        for (int j = 0; j < N; j += Q4_E) {
+            int nj = (N - j < Q4_E) ? (N - j) : Q4_E;
+            GM2LM(x + j, lx, nj * 4);
+            GM2LM(W + (long)m * rowstride + (j >> 1), lw, nj >> 1);
+            for (int i = 0; i < nj; i += 2) {
+                unsigned char bb = lw[i >> 1];
+                a += (float)Q4_S(bb) * lx[i] + (float)Q4_T(bb) * lx[i + 1];
+            }
+        }
+        y[m] = a * lsw[0];
+    }
+}
+
+void run_gemv_q4(int cl, int co, const void *W, const void *xq, const void *xs,
+                 void *y, int M, int N) {
+    gemv_q4_i8_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)xq,
+                             (const float *)xs, (float *)y, M, N);
+}
+
+void run_gemv_q4f(int cl, int co, const void *W, const void *x, void *y, int M, int N) {
+    gemv_q4_f32_k<<<cl, co>>>((const unsigned char *)W, (const float *)x,
+                              (float *)y, M, N);
+}
+
+__global__ void kq4_info_k(int *o) { o[0] = cluster_num(); o[1] = core_num(); }
+void kq4_info(int *o) { kq4_info_k<<<1, 1>>>(o); }

@@ -1,0 +1,38 @@
+#!/bin/bash
+# recycle2.sh — 干净停掉 8090 服务 + 卡上所有 orn 引擎/安全网包装 (含 v2 的 orn2/orn3/serve2.py)
+#   修掉前一版 recycle.sh 漏匹配 serve2.py / orn3 / safe_run -n orn 的问题:
+#   先杀"持有 /dev/xpu 的引擎", 再杀服务进程, 最后按 /proc/<pid>/fd 实测残留, 不靠猜名字。
+echo "--- 1) 杀服务进程 (serve*.py) ---"
+for pat in "serve2\.py" "serve\.py" "ornserv[e]*\.py"; do
+  pkill -f "$pat" 2>/dev/null && echo "  已 TERM: $pat"
+done
+echo "--- 2) 杀安全网包装 (safe_run.sh -n orn*) 与卡上引擎 ---"
+pkill -f "safe_run\.sh -n orn" 2>/dev/null && echo "  已 TERM: safe_run.sh -n orn*"
+sleep 2
+pkill -9 -f "safe_run\.sh -n orn" 2>/dev/null
+for e in "orn_engine/orn3 --n" "orn_engine/orn2 --n" "orn_engine/orn --n"; do
+  pkill -9 -f "$e" 2>/dev/null && echo "  已 KILL: $e"
+done
+pkill -9 -f "orn_engine/orn3\$" 2>/dev/null
+sleep 2
+echo "--- 3) 按 /proc/<pid>/fd 实测谁还持有 /dev/xpu* ---"
+LEFT=0
+for p in /proc/[0-9]*; do
+  pid=${p#/proc/}
+  [ "$pid" = "$$" ] && continue
+  if ls -l "$p/fd" 2>/dev/null | grep -q "/dev/xpu"; then
+    echo "  仍持有: pid=$pid $(tr -d '\0' < $p/cmdline | head -c 90)"
+    LEFT=$((LEFT+1))
+  fi
+done
+echo "  残留持卡进程数=$LEFT"
+echo "--- 4) 残留检查 ---"
+pgrep -a -f "serve[0-9]*\.py" || echo "  server: 无"
+pgrep -a -f "safe_run\.sh -n orn" || echo "  safe_run: 无"
+pgrep -a -f "orn_engine/orn" || echo "  引擎: 无"
+echo "--- 5) 设备 state / 端口 8090 ---"
+cat /proc/xpu/dev0/state /proc/xpu/dev1/state
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep -w 8090 || echo "  8090: 未被监听"
+echo "--- 6) 卡异常累计(kern.log) ---"
+grep -c "Exception in kernel execution" /var/log/kern.log 2>/dev/null
+exit 0

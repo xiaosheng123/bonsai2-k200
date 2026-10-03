@@ -1,0 +1,78 @@
+{
+ "rows": [
+  {
+   "rnd": 1,
+   "q": "只回答一个数字：5 + 6 等于几？",
+   "text": "11",
+   "sha": "17ba0791499d",
+   "wall": 8.78,
+   "ptok": 325,
+   "reused": 0,
+   "new": 325,
+   "prefill": 8.599,
+   "fp": "★ GEN 2 tok ids=37553e94c1debd03 bytes=9b089e00c5d01da5 prompt=744cc167622ad9a9(325 tok)"
+  },
+  {
+   "rnd": 2,
+   "q": "只回答一个数字：7 + 8 等于几？",
+   "text": "15",
+   "sha": "f1abd670358e",
+   "wall": 1.11,
+   "ptok": 325,
+   "reused": 300,
+   "new": 25,
+   "prefill": 0.934,
+   "fp": "★ GEN 2 tok ids=b73feeb61ab5af47 bytes=9b089a00c5d016d9 prompt=fcfc900183fb78ad(325 tok)"
+  },
+  {
+   "rnd": 3,
+   "q": "只回答一个数字：9 + 10 等于几？",
+   "text": "19",
+   "sha": "b3f0c7f6bb76",
+   "wall": 1.18,
+   "ptok": 326,
+   "reused": 300,
+   "new": 26,
+   "prefill": 1.0,
+   "fp": "★ GEN 2 tok ids=372a9ed7738ca18b bytes=9b08a600c5d02b3d prompt=b2023f70a8abfa0b(326 tok)"
+  },
+  {
+   "rnd": 4,
+   "q": "只回答一个数字：11 + 12 等于几？",
+   "text": "23",
+   "sha": "d435a6cdd786",
+   "wall": 1.2,
+   "ptok": 327,
+   "reused": 300,
+   "new": 27,
+   "prefill": 1.008,
+   "fp": "★ GEN 2 tok ids=d90f9e7043cc67a0 bytes=9b059400c5cdd6d0 prompt=cab6b8101f7a5bb1(327 tok)"
+  },
+  {
+   "rnd": 5,
+   "q": "只回答一个数字：13 + 14 等于几？",
+   "text": "27",
+   "sha": "bc33ea4e26e5",
+   "wall": 1.22,
+   "ptok": 327,
+   "reused": 300,
+   "new": 27,
+   "prefill": 1.046,
+   "fp": "★ GEN 2 tok ids=58fa4e919ca359e4 bytes=9b059800c5cddd9c prompt=93762cfa144651fd(327 tok)"
+  },
+  {
+   "rnd": 6,
+   "q": "只回答一个数字：15 + 16 等于几？",
+   "text": "31",
+   "sha": "632667547e7c",
+   "wall": 1.15,
+   "ptok": 327,
+   "reused": 300,
+   "new": 27,
+   "prefill": 0.964,
+   "fp": "★ GEN 2 tok ids=f95fb082ac0028c1 bytes=9b021200c5cac413 prompt=1048b6fe657f9819(327 tok)"
+  }
+ ],
+ "resend_same": true,
+ "ok": true
+}

@@ -1,0 +1,91 @@
+{
+ "ok": false,
+ "rows": [
+  {
+   "tag": "run1-冷启动 P_FULL",
+   "text": "5",
+   "finish": "stop",
+   "sha": "ac3478d69a3c",
+   "wall": 5.39,
+   "prompt_tokens": 182,
+   "lcp_reused": null,
+   "lcp_new": null,
+   "prefill_secs": null,
+   "prefill_ms_per_tok": null,
+   "fp": null,
+   "lcp_info": null,
+   "engine_prefill": "[orn] prompt=182 tok 用时 5.24s (28.8 ms/tok, 全量 复用0 tok) | 生成 1 tok 用时 0.06s = 16.029 tok/s | gemv 7249 次"
+  },
+  {
+   "tag": "run2-前缀 P_PREF",
+   "text": "17",
+   "finish": "stop",
+   "sha": "0716d9708d32",
+   "wall": 1.2,
+   "prompt_tokens": 182,
+   "lcp_reused": null,
+   "lcp_new": null,
+   "prefill_secs": null,
+   "prefill_ms_per_tok": null,
+   "fp": null,
+   "lcp_info": null,
+   "engine_prefill": "[orn] prompt=182 tok 用时 1.00s (39.9 ms/tok, 会话 复用157 tok) | 生成 2 tok 用时 0.13s = 15.997 tok/s | gemv 8411 次"
+  },
+  {
+   "tag": "run3-扰动 你好",
+   "text": "你好！有什么我可以帮你的吗？😊",
+   "finish": "stop",
+   "sha": "bb3f31771d29",
+   "wall": 1.33,
+   "prompt_tokens": 13,
+   "lcp_reused": null,
+   "lcp_new": null,
+   "prefill_secs": null,
+   "prefill_ms_per_tok": null,
+   "fp": null,
+   "lcp_info": null,
+   "engine_prefill": "[orn] prompt=13 tok 用时 0.76s (58.2 ms/tok, 全量 复用0 tok) | 生成 9 tok 用时 0.54s = 16.532 tok/s | gemv 11249 次"
+  },
+  {
+   "tag": "run4-LCP复用 P_FULL",
+   "text": "5",
+   "finish": "stop",
+   "sha": "ac3478d69a3c",
+   "wall": 1.21,
+   "prompt_tokens": 182,
+   "lcp_reused": null,
+   "lcp_new": null,
+   "prefill_secs": null,
+   "prefill_ms_per_tok": null,
+   "fp": null,
+   "lcp_info": null,
+   "engine_prefill": "[orn] prompt=182 tok 用时 1.08s (43.0 ms/tok, 会话 复用157 tok) | 生成 1 tok 用时 0.06s = 16.800 tok/s | gemv 12282 次"
+  },
+  {
+   "tag": "run5-整段命中 P_FULL",
+   "text": "5",
+   "finish": "stop",
+   "sha": "ac3478d69a3c",
+   "wall": 0.14,
+   "prompt_tokens": 182,
+   "lcp_reused": null,
+   "lcp_new": null,
+   "prefill_secs": null,
+   "prefill_ms_per_tok": null,
+   "fp": null,
+   "lcp_info": null,
+   "engine_prefill": "[orn] prompt=182 tok 用时 0.00s (0.0 ms/tok, 快照 复用182 tok) | 生成 1 tok 用时 0.07s = 14.027 tok/s | gemv 12411 次"
+  }
+ ],
+ "verdict": [
+  "  run1(冷) vs run4(LCP复用) 输出ids指纹相同         ✗ None/None",
+  "  run1(冷) vs run4(LCP复用) 输出字节指纹相同          ✗ ",
+  "  run1(冷) vs run4(LCP复用) prompt指纹相同        ✗ ",
+  "  run1(冷) vs run4(LCP复用) 输出 tok 数相同        ✗ ",
+  "  run1(冷) vs run4(LCP复用) 回答逐字节相同           ✓ ac3478d69a3c/ac3478d69a3c",
+  "  run1(冷) vs run5(整段命中) 输出ids指纹相同          ✗ ",
+  "  run4 真走了 LCP 复用(复用>0 且 新增>0)             ✗ 复用=None 新增=None",
+  "  run1 是冷启动全量(复用=0)                        ✓ 复用=None",
+  "  run5 整段命中(新增=0)                          ✓ 新增=None"
+ ]
+}

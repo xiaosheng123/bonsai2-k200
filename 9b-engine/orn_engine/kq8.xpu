@@ -1,0 +1,231 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// K200 Q8_0 原生布局 int8 GEMV (零重排: ggml block_q8_0 = fp16 d + int8 qs[32] = 34B/32w)
+//   变体 A: 激活 x 为 fp32 (精度基准)
+//   变体 B: 激活 x 也量化为 int8 (每 32 一个 scale), int32 累加后乘 (s_w * s_x)
+#define Q8_BQ 32
+#define Q8_BB 34
+#define Q8_E  1024
+#define Q8_RB 256
+
+#define HW_CORE 16   // 实测: 每 cluster 只有 16 个核真正执行; core_num() 返回的是申请值
+#define KQ8_TID  (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define KQ8_NT   (cluster_num() * HW_CORE)
+
+#define Q8_D(p) ({ unsigned short hh__ = *(const unsigned short *)(p); \
+    unsigned s__ = (unsigned)(hh__ & 0x8000) << 16; \
+    int e__ = (hh__ >> 10) & 0x1f; unsigned m__ = hh__ & 0x3ff, u__; \
+    if (e__ == 0) { if (!m__) u__ = s__; else { int sh__ = 0; while (!(m__ & 0x400)) { m__ <<= 1; sh__++; } m__ &= 0x3ff; \
+                   u__ = s__ | ((unsigned)(127 - 15 - sh__) << 23) | (m__ << 13); } } \
+    else if (e__ == 31) u__ = s__ | 0x7f800000u | (m__ << 13); \
+    else u__ = s__ | ((unsigned)(e__ - 15 + 127) << 23) | (m__ << 13); \
+    float f__; __builtin_memcpy(&f__, &u__, 4); f__; })
+
+__global__ void gemv_q8_0_k(const unsigned char *W, const float *x, float *y, int M, int N) {
+    int tid  = KQ8_TID;
+    int nthr = KQ8_NT;
+    __local__ float lx[Q8_E];
+    __local__ unsigned char lw[(Q8_E / Q8_BQ) * Q8_BB];
+    __local__ float lacc[Q8_RB];
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per;
+    if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int rowstride = (N / Q8_BQ) * Q8_BB;
+    for (int mb = m0; mb < m1; mb += Q8_RB) {
+        int me = mb + Q8_RB; if (me > m1) me = m1;
+        int nrow = me - mb;
+        for (int i = 0; i < nrow; i++) lacc[i] = 0.f;
+        for (int j = 0; j < N; j += Q8_E) {
+            GM2LM(x + j, lx, Q8_E * 4);
+            for (int m = mb; m < me; m++) {
+                GM2LM(W + m * rowstride + (j / Q8_BQ) * Q8_BB, lw, (Q8_E / Q8_BQ) * Q8_BB);
+                float a0 = lacc[m - mb], a1 = 0.f;
+                for (int b = 0; b < (Q8_E / Q8_BQ); b++) {
+                    float sc = Q8_D(lw + b * Q8_BB);
+                    const signed char *p = (const signed char *)(lw + b * Q8_BB + 2);
+                    for (int i = 0; i < Q8_BQ; i += 2) {
+                        a0 += (float)p[i    ] * sc * lx[b * Q8_BQ + i    ];
+                        a1 += (float)p[i + 1] * sc * lx[b * Q8_BQ + i + 1];
+                    }
+                }
+                lacc[m - mb] = a0 + a1;
+            }
+        }
+        LM2GM(lacc, y + mb, nrow * 4);
+    }
+}
+
+__global__ void gemv_q8_0s_k(const unsigned char *W, const float *x, float *y, int M, int N) {
+    int tid  = KQ8_TID;
+    int nthr = KQ8_NT;
+    __local__ float lx[Q8_E];
+    __local__ unsigned char lw[(Q8_E / Q8_BQ) * Q8_BB];
+    int nb = N / Q8_BQ;
+    GM2LM(x, lx, Q8_E * 4);
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per;
+    if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int rowstride = nb * Q8_BB;
+    for (int m = m0; m < m1; m++) {
+        GM2LM(W + m * rowstride, lw, nb * Q8_BB);
+        float a0 = 0.f, a1 = 0.f;
+        for (int b = 0; b < nb; b++) {
+            float sc = Q8_D(lw + b * Q8_BB);
+            const signed char *p = (const signed char *)(lw + b * Q8_BB + 2);
+            for (int i = 0; i < Q8_BQ; i += 2) {
+                a0 += (float)p[i    ] * sc * lx[b * Q8_BQ + i    ];
+                a1 += (float)p[i + 1] * sc * lx[b * Q8_BQ + i + 1];
+            }
+        }
+        y[m] = a0 + a1;
+    }
+}
+
+// ---- 变体 B: 权重 int8 x 激活 int8, int32 累加 ----
+__global__ void gemv_q8_i8_k(const unsigned char *W, const unsigned char *xq, const float *xs, float *y, int M, int N) {
+    int tid  = KQ8_TID;
+    int nthr = KQ8_NT;
+    __local__ unsigned char lx[Q8_E];
+    __local__ unsigned char lw[(Q8_E / Q8_BQ) * Q8_BB];
+    __local__ float lxs[Q8_E / Q8_BQ];
+    __local__ float lacc[Q8_RB];
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per;
+    if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int rowstride = (N / Q8_BQ) * Q8_BB;
+    for (int mb = m0; mb < m1; mb += Q8_RB) {
+        int me = mb + Q8_RB; if (me > m1) me = m1;
+        int nrow = me - mb;
+        for (int i = 0; i < nrow; i++) lacc[i] = 0.f;
+        for (int j = 0; j < N; j += Q8_E) {
+            GM2LM(xq + j, lx, Q8_E);
+            GM2LM(xs + (j / Q8_BQ), lxs, (Q8_E / Q8_BQ) * 4);
+            for (int m = mb; m < me; m++) {
+                GM2LM(W + m * rowstride + (j / Q8_BQ) * Q8_BB, lw, (Q8_E / Q8_BQ) * Q8_BB);
+                float a0 = lacc[m - mb];
+                for (int b = 0; b < (Q8_E / Q8_BQ); b++) {
+                    float sc = Q8_D(lw + b * Q8_BB) * lxs[b];
+                    const signed char *p = (const signed char *)(lw + b * Q8_BB + 2);
+                    const signed char *q = (const signed char *)(lx + b * Q8_BQ);
+                    int acc0 = 0, acc1 = 0;
+                    for (int i = 0; i < Q8_BQ; i += 2) {
+                        acc0 += (int)p[i    ] * (int)q[i    ];
+                        acc1 += (int)p[i + 1] * (int)q[i + 1];
+                    }
+                    a0 += (float)(acc0 + acc1) * sc;
+                }
+                lacc[m - mb] = a0;
+            }
+        }
+        LM2GM(lacc, y + mb, nrow * 4);
+    }
+}
+
+__global__ void gemv_q8_i8s_k(const unsigned char *W, const unsigned char *xq, const float *xs, float *y, int M, int N) {
+    int tid  = KQ8_TID;
+    int nthr = KQ8_NT;
+    __local__ unsigned char lx[Q8_E];
+    __local__ unsigned char lw[(Q8_E / Q8_BQ) * Q8_BB];
+    __local__ float lxs[Q8_E / Q8_BQ];
+    int nb = N / Q8_BQ;
+    GM2LM(xq, lx, Q8_E);
+    GM2LM(xs, lxs, (Q8_E / Q8_BQ) * 4);
+    int rows_per = (M + nthr - 1) / nthr; rows_per = (rows_per + 3) & ~3;
+    int m0 = tid * rows_per;
+    if (m0 >= M) return;
+    int m1 = m0 + rows_per; if (m1 > M) m1 = M;
+    int rowstride = nb * Q8_BB;
+    for (int m = m0; m < m1; m++) {
+        GM2LM(W + m * rowstride, lw, nb * Q8_BB);
+        float a0 = 0.f;
+        for (int b = 0; b < nb; b++) {
+            float sc = Q8_D(lw + b * Q8_BB) * lxs[b];
+            const signed char *p = (const signed char *)(lw + b * Q8_BB + 2);
+            const signed char *q = (const signed char *)(lx + b * Q8_BQ);
+            int acc0 = 0, acc1 = 0;
+            for (int i = 0; i < Q8_BQ; i += 2) {
+                acc0 += (int)p[i    ] * (int)q[i    ];
+                acc1 += (int)p[i + 1] * (int)q[i + 1];
+            }
+            a0 += (float)(acc0 + acc1) * sc;
+        }
+        y[m] = a0;
+    }
+}
+
+void run_gemv_q8_0(int cl, int co, const void *W, const void *x, void *y, int M, int N) {
+    if (N <= Q8_E) gemv_q8_0s_k<<<cl, co>>>((const unsigned char *)W, (const float *)x, (float *)y, M, N);
+    else           gemv_q8_0_k <<<cl, co>>>((const unsigned char *)W, (const float *)x, (float *)y, M, N);
+}
+void run_gemv_q8_0i(int cl, int co, const void *W, const void *xq, const void *xs, void *y, int M, int N) {
+    if (N <= Q8_E) gemv_q8_i8s_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)xq, (const float *)xs, (float *)y, M, N);
+    else           gemv_q8_i8_k <<<cl, co>>>((const unsigned char *)W, (const unsigned char *)xq, (const float *)xs, (float *)y, M, N);
+}
+
+// ==================== V2: 行重排 + int32 打包 MAC ====================
+// 行布局: 每 4096 权重 -> [4096 int8][128 x f16 scale] = 4352B; 段步长 4352
+#define V2_KC 4096
+#define V2_ST (V2_KC + (V2_KC/32)*2)          // 4352
+__global__ void gemv_q8v2_k(const unsigned char *W, const unsigned char *xq, const float *xs, float *y, int M, int N) {
+    int tid  = KQ8_TID;
+    int nthr = KQ8_NT;
+    __local__ unsigned char lw[V2_ST];                 // 4352
+    __local__ unsigned char lx[V2_KC];                 // 4096
+    __local__ float lxs[V2_KC/32];                     // 128
+    __local__ float lacc[32];
+    const int nch = N / V2_KC;
+    const int nb  = N / 32;
+    const int rowbytes = N + nb * 2;                    // <= 13056, int 足够
+    const int RB = 32;
+    int nrb = (M + RB - 1) / RB;
+    int rb_per = (nrb + nthr - 1) / nthr;
+    int r0 = tid * rb_per; if (r0 >= nrb) return;
+    int r1 = r0 + rb_per;  if (r1 > nrb) r1 = nrb;
+    for (int rb = r0; rb < r1; rb++) {
+        int m0 = rb * RB;
+        int nrow = (M - m0 < RB) ? (M - m0) : RB;
+        for (int i = 0; i < nrow; i++) lacc[i] = 0.f;
+        for (int c = 0; c < nch; c++) {
+            GM2LM(xq + c * V2_KC, lx, V2_KC);
+            GM2LM(xs + c * (V2_KC / 32), lxs, (V2_KC / 32) * 4);
+            int woff = m0 * rowbytes + c * V2_ST;
+            for (int i = 0; i < nrow; i++) {
+                GM2LM(W + woff + i * rowbytes, lw, V2_ST);
+                const int *qp = (const int *)lw;
+                const int *x32 = (const int *)lx;
+                const unsigned short *sc = (const unsigned short *)(lw + V2_KC);
+                float fa = 0.f;
+                for (int b = 0; b < V2_KC / 32; b++) {
+                    const int *p = qp + b * 8;
+                    const int *q = x32 + b * 8;
+                    int a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+                    for (int k = 0; k < 8; k += 2) {
+                        int A0 = p[k], A1 = p[k + 1], B0 = q[k], B1 = q[k + 1];
+                        a0 += (A0 << 24 >> 24) * (B0 << 24 >> 24);
+                        a1 += (A0 << 16 >> 24) * (B0 << 16 >> 24);
+                        a2 += (A0 <<  8 >> 24) * (B0 <<  8 >> 24);
+                        a3 += (A0 >> 24)        * (B0 >> 24);
+                        a0 += (A1 << 24 >> 24) * (B1 << 24 >> 24);
+                        a1 += (A1 << 16 >> 24) * (B1 << 16 >> 24);
+                        a2 += (A1 <<  8 >> 24) * (B1 <<  8 >> 24);
+                        a3 += (A1 >> 24)        * (B1 >> 24);
+                    }
+                    fa += (float)(a0 + a1 + a2 + a3) * (Q8_D(sc + b) * lxs[b]);
+                }
+                lacc[i] += fa;
+            }
+        }
+        LM2GM(lacc, y + m0, nrow * 4);
+    }
+}
+void run_gemv_q8v2(int cl, int co, const void *W, const void *xq, const void *xs, void *y, int M, int N) {
+    gemv_q8v2_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)xq, (const float *)xs, (float *)y, M, N);
+}
+
+__global__ void kq8_info_k(int *o) { o[0] = cluster_num(); o[1] = core_num(); }
+void kq8_info(int *o) { kq8_info_k<<<1, 1>>>(o); }

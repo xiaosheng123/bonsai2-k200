@@ -1,0 +1,4 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+__global__ void nop_k(float *o) { int t = core_id(); if (o) o[t & 15] = (float)t; }
+void run_nop(float *o, int cl, int co) { nop_k<<<cl, co>>>(o); }

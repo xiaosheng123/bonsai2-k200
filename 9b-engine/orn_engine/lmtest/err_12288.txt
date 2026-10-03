@@ -1,0 +1,7 @@
+lm_12288.xpu:7:5: error: no matching function for call to 'LM2GM'
+    LM2GM(l, (int*)o, 4);
+    ^~~~~
+/home/caden/xtdk/xtdk-x86_64/lib/clang/8.0.1/include/xpu/kernel/cluster_memory.h:179:24: note: candidate function not viable: no known conversion from 'int *' to '__attribute__((address_space(1))) void *' for 2nd argument
+static void __device__ LM2GM(const void* srcptr, _global_ptr_ void* dstptr, int size) {
+                       ^
+1 error generated when compiling for .

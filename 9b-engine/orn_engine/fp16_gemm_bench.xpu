@@ -1,0 +1,66 @@
+// fp16 GEMM micro-benchmark for K200
+// Compile: clang -I/home/caden/xtdk/xtdk-x86_64/include -I/usr/local/xpu-4.33.0/include --xpu-device-only -O2 fp16_gemm_bench.xpu -o fp16_gemm_bench.sec
+// Then host side to time it
+
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+
+#define M 1
+#define N 128
+#define K 4096
+
+__global__ void fp16_gemm_kernel(
+    const __fp16 *A,   // [M][K]
+    const __fp16 *B,   // [K][N] (column-major for fc)
+    __fp16 *C,         // [M][N]
+    int M_, int N_, int K_
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    
+    if (cid >= 16) return;
+    
+    // Each core handles N/16 columns
+    int n_per_core = (N_ + 15) / 16;
+    int n_start = cid * n_per_core;
+    int n_end = min(n_start + n_per_core, N_);
+    
+    if (n_start >= N_) return;
+    
+    __local__ __fp16 a_local[K];
+    __local__ __fp16 b_local[128];  // max N
+    __local__ float c_local[128];
+    
+    // Load A row (broadcast to all cores)
+    if (cid == 0) {
+        for (int k = 0; k < K_; k++) {
+            a_local[k] = A[k];
+        }
+    }
+    // sync needed? no cluster sync in this model
+    
+    // Each core loads its B columns
+    for (int k = 0; k < K_; k++) {
+        b_local[k] = B[k * N_ + n_start];
+    }
+    
+    // Compute
+    for (int n = n_start; n < n_end; n++) {
+        float acc = 0.0f;
+        for (int k = 0; k < K_; k++) {
+            acc += __half2float(a_local[k]) * __half2float(B[k * N_ + n]);
+        }
+        c_local[n - n_start] = acc;
+    }
+    
+    // Store
+    for (int n = n_start; n < n_end; n++) {
+        C[n] = __float2half_rn(c_local[n - n_start]);
+    }
+}
+
+// Host launch
+void run_fp16_gemm(int M, int N, int K, const __fp16 *A, const __fp16 *B, __fp16 *C) {
+    fp16_gemm_kernel<<<8, 16>>>(A, B, C, M, N, K);
+}

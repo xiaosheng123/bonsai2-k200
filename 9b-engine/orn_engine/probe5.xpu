@@ -1,0 +1,110 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define HW_CORE 16
+#define TID (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define NT  (cluster_num() * HW_CORE)
+
+// 纯 MAC 吞吐: local 里 4352B 行 (前 256B = 128 个 f16 scale, 后 4096 = int8 qs)
+// R 次重复, 返回每核累加和 (防优化)
+#define ROWBOOT unsigned char row[4352]; unsigned char xq[4096]; \
+    GM2LM(W, row, 4352); GM2LM(X, xq, 4096);
+
+// V1: 逐字节, 4 累加器
+__global__ void m1_k(const unsigned char *W, const unsigned char *X, int R, float *out) {
+    int tid = TID;
+    ROWBOOT
+    const signed char *qp = (const signed char *)(row + 256);
+    const signed char *q = (const signed char *)xq;
+    float a = 0;
+    for (int r = 0; r < R; r++) {
+        int s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int b = 0; b < 128; b++) {
+            const signed char *p = qp + b * 32, *qq = q + b * 32;
+            for (int i = 0; i < 32; i += 4) {
+                s0 += (int)p[i] * (int)qq[i];
+                s1 += (int)p[i + 1] * (int)qq[i + 1];
+                s2 += (int)p[i + 2] * (int)qq[i + 2];
+                s3 += (int)p[i + 3] * (int)qq[i + 3];
+            }
+        }
+        a += (float)(s0 + s1 + s2 + s3);
+    }
+    out[tid] = a;
+}
+void run_m1(const void *W, const void *X, int R, void *o, int cl, int co) { m1_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)X, R, (float *)o); }
+
+// V2: int32 打包读 (一次 4 个 int8), 4 累加器, 用指针强转
+__global__ void m2_k(const unsigned char *W, const unsigned char *X, int R, float *out) {
+    int tid = TID;
+    ROWBOOT
+    const int *qp = (const int *)(row + 256);
+    const int *q = (const int *)xq;
+    float a = 0;
+    for (int r = 0; r < R; r++) {
+        int s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int b = 0; b < 128; b++) {
+            const int *p = qp + b * 8, *qq = q + b * 8;
+            for (int i = 0; i < 8; i += 2) {
+                int A0 = p[i], A1 = p[i + 1], B0 = qq[i], B1 = qq[i + 1];
+                s0 += (A0 << 24 >> 24) * (B0 << 24 >> 24);
+                s1 += (A0 << 16 >> 24) * (B0 << 16 >> 24);
+                s2 += (A0 << 8 >> 24) * (B0 << 8 >> 24);
+                s3 += (A0 >> 24) * (B0 >> 24);
+                s0 += (A1 << 24 >> 24) * (B1 << 24 >> 24);
+                s1 += (A1 << 16 >> 24) * (B1 << 16 >> 24);
+                s2 += (A1 << 8 >> 24) * (B1 << 8 >> 24);
+                s3 += (A1 >> 24) * (B1 >> 24);
+            }
+        }
+        a += (float)(s0 + s1 + s2 + s3);
+    }
+    out[tid] = a;
+}
+void run_m2(const void *W, const void *X, int R, void *o, int cl, int co) { m2_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)X, R, (float *)o); }
+
+// V3: 逐字节 8 累加器 (长展开)
+__global__ void m3_k(const unsigned char *W, const unsigned char *X, int R, float *out) {
+    int tid = TID;
+    ROWBOOT
+    const signed char *qp = (const signed char *)(row + 256);
+    const signed char *q = (const signed char *)xq;
+    float a = 0;
+    for (int r = 0; r < R; r++) {
+        int s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0;
+        for (int i = 0; i < 4096; i += 8) {
+            s0 += (int)qp[i] * (int)q[i];
+            s1 += (int)qp[i + 1] * (int)q[i + 1];
+            s2 += (int)qp[i + 2] * (int)q[i + 2];
+            s3 += (int)qp[i + 3] * (int)q[i + 3];
+            s4 += (int)qp[i + 4] * (int)q[i + 4];
+            s5 += (int)qp[i + 5] * (int)q[i + 5];
+            s6 += (int)qp[i + 6] * (int)q[i + 6];
+            s7 += (int)qp[i + 7] * (int)q[i + 7];
+        }
+        a += (float)(s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7);
+    }
+    out[tid] = a;
+}
+void run_m3(const void *W, const void *X, int R, void *o, int cl, int co) { m3_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)X, R, (float *)o); }
+
+// V4: 逐字节 2 累加器 (老内核风格, 每块乘 scale)
+__global__ void m4_k(const unsigned char *W, const unsigned char *X, int R, float *out) {
+    int tid = TID;
+    ROWBOOT
+    float a = 0;
+    for (int r = 0; r < R; r++) {
+        float f = 0;
+        for (int b = 0; b < 128; b++) {
+            const signed char *p = (const signed char *)(row + b * 34 + 2);
+            const signed char *q = (const signed char *)xq + b * 32;
+            int a0 = 0, a1 = 0;
+            for (int i = 0; i < 32; i += 2) { a0 += (int)p[i] * (int)q[i]; a1 += (int)p[i + 1] * (int)q[i + 1]; }
+            f += (float)(a0 + a1);
+        }
+        a += f;
+    }
+    out[tid] = a;
+}
+void run_m4(const void *W, const void *X, int R, void *o, int cl, int co) { m4_k<<<cl, co>>>((const unsigned char *)W, (const unsigned char *)X, R, (float *)o); }

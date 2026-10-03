@@ -1,0 +1,822 @@
+// ============================================================================
+// vis.cpp — Ornith 视觉塔 (SigLIP-so400m-16-768 + qwen3vl_merger) 在 K200 双芯上实现
+//   大矩阵乘 = 官方 api::gemm_int8 (SD-CDNN), 与文本路径完全同一套约定:
+//       - 权重每输出行对称 int8 + 每行一个 float scale; max_b 传 127; 输出按行 scale 折回
+//       - 激活在主机做"行归一化" (A[t,:] *= M0/max|A[t,:]|), 输出再 *max_t/M0
+//   norm / GELU / softmax / M-RoPE / 残差 在主机 float (与文本引擎既有做法一致)
+//   ★ 禁用 gemm_int8_maxptr / api::fc<float,float,float,int> (都曾把卡打进 ERROR)
+// ============================================================================
+#include "vis.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cstdint>
+#include <cmath>
+#include <string>
+#include <map>
+#include <vector>
+#include <algorithm>
+#include <chrono>
+#include <omp.h>
+#include <xpu/runtime.h>
+#include "xpu/refactor/nn.h"
+#include "xpu/refactor/context/xpu_act_type.h"
+
+namespace api = baidu::xpu::api;
+namespace baidu { namespace xpu { namespace api {
+int gemm_int8(Context* ctx, const bool trans_a, const bool trans_b, int m, int n, int k,
+              float alpha, const float* a, int lda, const int8_t* b, float max_b, int ldb,
+              float beta, float* c, int ldc);
+}}}
+
+#define VNE      1152        // 视觉塔 hidden
+#define VNH      16          // head 数
+#define VDH      72          // head dim
+#define VNL      27          // 层数
+#define VFFN     4304
+#define VEPS     1e-6f
+#define VMA        1024      // 512x512 => 32x32 patches
+#define VMA_MAX    2304      // 768x768 => 48x48 patches
+#define VKMAX    4608        // mm.0 的 K
+#define VTMAX    4096        // 最大图像 token 数 (留足余量)
+
+static double vnow() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static int g_vdbg = 0;
+
+// ============================================================================
+// 1. 极简 GGUF 解析 (只服务 mmproj: F32 / BF16 / F16)
+// ============================================================================
+struct VGT { int nd; int64_t ne[4]; int type; uint64_t off; };
+struct VG {
+    FILE* f = nullptr;
+    uint64_t dstart = 0, align = 32;
+    std::map<std::string, VGT> ts;
+
+    static void skip_val(FILE* f, int t) {
+        switch (t) {
+            case 0: case 1: case 7: { int8_t x; if (fread(&x, 1, 1, f)) {} break; }
+            case 2: case 3: { int16_t x; if (fread(&x, 2, 1, f)) {} break; }
+            case 4: case 5: case 6: { int32_t x; if (fread(&x, 4, 1, f)) {} break; }
+            case 10: case 11: case 12: { int64_t x; if (fread(&x, 8, 1, f)) {} break; }
+            case 8: { uint64_t n; if (fread(&n, 8, 1, f)) {} fseek(f, (long)n, SEEK_CUR); break; }
+            case 9: {
+                uint32_t et; uint64_t n;
+                if (fread(&et, 4, 1, f)) {} if (fread(&n, 8, 1, f)) {}
+                for (uint64_t i = 0; i < n; i++) skip_val(f, (int)et);
+                break;
+            }
+            default: printf("[vis] FATAL: 未知 KV 类型 %d\n", t); exit(1);
+        }
+    }
+    bool open(const char* path) {
+        f = fopen(path, "rb");
+        if (!f) { printf("[vis] FATAL: 打不开 %s\n", path); return false; }
+        uint32_t magic, ver; uint64_t nt, nkv;
+        if (fread(&magic, 4, 1, f) != 1 || fread(&ver, 4, 1, f) != 1 ||
+            fread(&nt, 8, 1, f) != 1 || fread(&nkv, 8, 1, f) != 1) return false;
+        if (magic != 0x46554747u) { printf("[vis] FATAL: 非 GGUF (magic=%08x)\n", magic); return false; }
+        for (uint64_t i = 0; i < nkv; i++) {
+            uint64_t kl; if (fread(&kl, 8, 1, f) != 1) return false;
+            std::vector<char> k(kl + 1); if (fread(k.data(), 1, kl, f) != kl) return false; k[kl] = 0;
+            uint32_t t; if (fread(&t, 4, 1, f) != 1) return false;
+            if (std::string(k.data()) == "general.alignment" && t == 4) {
+                uint32_t a; if (fread(&a, 4, 1, f) != 1) return false; align = a;
+            } else skip_val(f, (int)t);
+        }
+        for (uint64_t i = 0; i < nt; i++) {
+            uint64_t nl; if (fread(&nl, 8, 1, f) != 1) return false;
+            std::vector<char> nm(nl + 1); if (fread(nm.data(), 1, nl, f) != nl) return false; nm[nl] = 0;
+            uint32_t nd; if (fread(&nd, 4, 1, f) != 1) return false;
+            VGT t; t.nd = (int)nd; t.ne[0] = t.ne[1] = t.ne[2] = t.ne[3] = 1;
+            for (uint32_t d = 0; d < nd; d++) { if (fread(&t.ne[d], 8, 1, f) != 1) return false; }
+            uint32_t ty; uint64_t off;
+            if (fread(&ty, 4, 1, f) != 1 || fread(&off, 8, 1, f) != 1) return false;
+            t.type = (int)ty; t.off = off;
+            ts[std::string(nm.data())] = t;
+        }
+        long p = ftell(f);
+        dstart = (uint64_t)((p + (long)align - 1) / (long)align * (long)align);
+        printf("[vis] mmproj GGUF: %zu tensors, align=%llu dstart=%llu\n", ts.size(),
+               (unsigned long long)align, (unsigned long long)dstart);
+        return true;
+    }
+    // 读张量 -> f32 (ggml 序, 长度 = prod(ne))
+    bool read_f32(const std::string& name, std::vector<float>& out) {
+        auto it = ts.find(name);
+        if (it == ts.end()) { printf("[vis] FATAL: 缺张量 %s\n", name.c_str()); return false; }
+        const VGT& t = it->second;
+        size_t n = 1; for (int i = 0; i < t.nd; i++) n *= (size_t)t.ne[i];
+        out.resize(n);
+        if (fseek(f, (long)(dstart + t.off), SEEK_SET)) { printf("[vis] FATAL: seek %s\n", name.c_str()); return false; }
+        if (t.type == 0) { if (fread(out.data(), 4, n, f) != n) return false; }
+        else if (t.type == 1) {
+            std::vector<uint16_t> h(n); if (fread(h.data(), 2, n, f) != n) return false;
+            for (size_t i = 0; i < n; i++) { uint32_t u = ((uint32_t)h[i]) << 16; float v; memcpy(&v, &u, 4); out[i] = v; }
+        } else if (t.type == 30) {
+            std::vector<uint16_t> h(n); if (fread(h.data(), 2, n, f) != n) return false;
+            for (size_t i = 0; i < n; i++) { uint32_t u = ((uint32_t)h[i]) << 16; float v; memcpy(&v, &u, 4); out[i] = v; }
+        } else { printf("[vis] FATAL: %s 类型 %d 不支持\n", name.c_str(), t.type); return false; }
+        return true;
+    }
+};
+
+// ============================================================================
+// 2. 卡上 int8 权重 (双芯按输出行分裂) + gemm 封装
+// ============================================================================
+struct VW {
+    std::vector<signed char> qhost;    // 仅调试 (VIS_CPUGEMM): 分块打包后的 int8 [c][n][k]
+    int N = 0, K = 0, CH = 0, nc = 0;  // [N,K] 行优先, 沿 K 按 CH 分块
+    std::vector<int> cs, koff;         // 每块长度 / 每块在 K 上的起点
+    std::vector<float> rs;             // 每块每输出行 scale: rs[c*N+n]
+    std::vector<size_t> coff[2];       // 每分区每块在分区缓冲内的 int8 偏移
+    int ns = 1, mp[2] = {0, 0}, dev[2] = {0, -1};
+    void* d[2] = {nullptr, nullptr};
+};
+static int g_vcpugemm = 0;
+static int g_vonly = 27;    // 调试: 只跑前 N 层   // ★ 调试开关 (VIS_CPUGEMM=1): 用主机 double 参考替代卡上 GEMM, 仅离线核对用; 默认 0
+// ★ 激活量化修正 (K 分块 + 每块各自行归一): VIS_CH = 大 gemm 的块大小 (默认 96);
+//   VIS_CHA = 注意力小 K (<=128) 的块大小 (默认 24)。<=0 表示不分块 (退回旧行为)
+static int g_vch = 0, g_vcha = 0;
+static uint64_t g_vhbm[2] = {0, 0};
+static api::Context* g_vctx[2] = {nullptr, nullptr};
+static void* g_vxA[2] = {nullptr, nullptr};    // A f32 (M*K)
+static void* g_vyC[2] = {nullptr, nullptr};    // C f32 (M*N)
+static void* g_vBd[2] = {nullptr, nullptr};    // 动态 int8 B (N*K)
+static size_t g_vAsz = 0, g_vCsz = 0, g_vBsz = 0;
+static double g_t_gemm = 0, g_t_host = 0;
+
+// K 分块表: cs = 每块长度, koff = 每块起点 (<=0 或 >K 表示不分块)
+static void vchunks(int K, int CH, std::vector<int>& cs, std::vector<int>& koff) {
+    cs.clear(); koff.clear();
+    if (CH <= 0 || CH > K) CH = K;
+    int o = 0;
+    while (o < K) { int n = K - o; if (n > CH) n = CH; cs.push_back(n); koff.push_back(o); o += n; }
+}
+
+// 把 W 的第 n0..n0+nrows 行按 [c][n][k] 打包量化到 out (长度 nrows*K)
+//   rs[c*N+n0+row] = 该块该行 scale;  coff[c] = 该块在 out 内的偏移
+static void vpack_rows(const float* W, int N, int K, int n0, int nrows,
+                       const std::vector<int>& cs, const std::vector<int>& koff,
+                       std::vector<float>& rs, std::vector<size_t>& coff, signed char* out) {
+    int nc = (int)cs.size();
+    coff.resize(nc);
+    size_t o = 0;
+    for (int c = 0; c < nc; c++) {
+        int cs_ = cs[c], k0 = koff[c];
+        coff[c] = o;
+        #pragma omp parallel for schedule(static)
+        for (int nn = 0; nn < nrows; nn++) {
+            const float* r = W + (size_t)(n0 + nn) * K + k0;
+            float am = 0;
+            for (int j = 0; j < cs_; j++) { float a = fabsf(r[j]); if (a > am) am = a; }
+            float s = am / 127.f; if (s <= 1e-30f) s = 1e-8f;
+            rs[(size_t)c * N + n0 + nn] = s;
+            signed char* dq = out + o + (size_t)nn * cs_;
+            for (int j = 0; j < cs_; j++) { int v = (int)lrintf(r[j] / s); if (v > 127) v = 127; else if (v < -127) v = -127; dq[j] = (signed char)v; }
+        }
+        o += (size_t)nrows * cs_;
+    }
+}
+
+// ★ 权重沿 K 分块、每块各自行归一 (每块每行一个 scale); 激活在同一次调用里做同样的事
+static void vw_from_f32(const std::vector<float>& W, int N, int K, VW& w) {
+    w.N = N; w.K = K;
+    w.CH = (g_vch > 0) ? g_vch : K;
+    vchunks(K, w.CH, w.cs, w.koff);
+    w.nc = (int)w.cs.size();
+    w.rs.assign((size_t)w.nc * N, 0.f);
+    if (g_vcpugemm) {
+        w.ns = 1; w.mp[0] = N; w.mp[1] = 0; w.dev[0] = 0; w.dev[1] = -1;
+        w.qhost.resize((size_t)N * K);
+        vpack_rows(W.data(), N, K, 0, N, w.cs, w.koff, w.rs, w.coff[0], w.qhost.data());
+        return;
+    }
+    w.ns = (N >= 64 && N % 2 == 0) ? 2 : 1;
+    w.mp[0] = (w.ns == 2) ? N / 2 : N;
+    w.mp[1] = (w.ns == 2) ? N - w.mp[0] : 0;
+    w.dev[0] = 0; w.dev[1] = (w.ns == 2) ? 1 : -1;
+    for (int p = 0; p < w.ns; p++) {
+        int dv = w.dev[p];
+        int n0 = (p == 0) ? 0 : w.mp[0];
+        size_t by = (size_t)w.mp[p] * K;
+        std::vector<signed char> buf(by);
+        vpack_rows(W.data(), N, K, n0, w.mp[p], w.cs, w.koff, w.rs, w.coff[p], buf.data());
+        xpu_set_device(dv);
+        if (xpu_malloc(&w.d[p], by)) { printf("[vis] FATAL: HBM 分配 %.2f MB 失败 chip%d\n", by / 1048576.0, dv); exit(1); }
+        if (xpu_memcpy(w.d[p], buf.data(), by, XPU_HOST_TO_DEVICE)) { printf("[vis] FATAL: H2D int8\n"); exit(1); }
+        xpu_wait();
+        g_vhbm[dv] += by;
+    }
+}
+
+// ★ 激活量化修正核心:
+//   C[M,N] = Σ_c  (A[:, 块c] 各自行归一 → 上卡 int8) · (B 块c)[N,cs_c]^T
+//   折回: 每块每行激活因子 (mxc[t]/Mc) × 每块每行权重 scale rs[c*N+n]
+//   bdev[p*nc+c]: 分区 p 第 c 块的 int8 B 设备指针 (B 打包布局 [c][n][k], 块内 k 连续, ldb=k=cs)
+static void vgemm_chunked(int N, int K, int nc, const std::vector<int>& cs, const std::vector<int>& koff,
+                          const std::vector<float>& rs, const int8_t* const* bdev,
+                          int ns, const int* mp, const int* devs, const float* A, int M, float* C) {
+    static std::vector<float> mxc, Ap, buf;
+    double t0 = vnow();
+    #pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < (size_t)M * N; i++) C[i] = 0.f;
+    for (int c = 0; c < nc; c++) {
+        int cs_ = cs[c], k0 = koff[c];
+        if ((size_t)M * cs_ * 4 > g_vAsz) { printf("[vis] FATAL: A 分块越界 M=%d cs=%d (缓冲 %zu B)\n", M, cs_, g_vAsz); exit(1); }
+        for (int p = 0; p < ns; p++)
+            if ((size_t)M * mp[p] > g_vCsz / 4) { printf("[vis] FATAL: C 分块越界 M=%d n=%d\n", M, mp[p]); exit(1); }
+        double th = vnow();
+        mxc.resize(M);
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < M; t++) {
+            const float* r = A + (size_t)t * K + k0; float am = 0;
+            for (int j = 0; j < cs_; j++) { float a = fabsf(r[j]); if (a > am) am = a; }
+            mxc[t] = am;
+        }
+        float Mc = 0;
+        for (int t = 0; t < M; t++) if (mxc[t] > Mc) Mc = mxc[t];
+        if (Mc <= 1e-30f) Mc = 1e-30f;
+        Ap.resize((size_t)M * cs_);
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < M; t++) {
+            float f = Mc / (mxc[t] > 1e-30f ? mxc[t] : 1e-30f);
+            const float* r = A + (size_t)t * K + k0; float* d = Ap.data() + (size_t)t * cs_;
+            for (int j = 0; j < cs_; j++) d[j] = r[j] * f;
+        }
+        g_t_host += vnow() - th;
+        for (int p = 0; p < ns; p++) {
+            int dv = devs[p];
+            xpu_set_device(dv);
+            if (xpu_memcpy(g_vxA[dv], Ap.data(), (size_t)M * cs_ * 4, XPU_HOST_TO_DEVICE)) { printf("[vis] FATAL: H2D A\n"); exit(1); }
+            int r = api::gemm_int8(g_vctx[dv], false, true, M, mp[p], cs_, 1.f,
+                                   (const float*)g_vxA[dv], cs_, bdev[(size_t)p * nc + c], 127.f, cs_,
+                                   0.f, (float*)g_vyC[dv], mp[p]);
+            if (r) { printf("[vis] FATAL: gemm_int8 r=%d (chip%d m=%d n=%d k=%d 块%d/%d)\n", r, dv, M, mp[p], cs_, c, nc); exit(1); }
+        }
+        int off = 0;
+        for (int p = 0; p < ns; p++) {
+            int dv = devs[p];
+            xpu_set_device(dv);
+            if (xpu_wait()) { printf("[vis] FATAL: gemm wait\n"); exit(1); }
+            size_t eles = (size_t)M * mp[p];
+            buf.resize(eles);
+            if (xpu_memcpy(buf.data(), g_vyC[dv], eles * 4, XPU_DEVICE_TO_HOST)) { printf("[vis] FATAL: D2H C\n"); exit(1); }
+            xpu_wait();
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < M; t++) {
+                const float* s = buf.data() + (size_t)t * mp[p];
+                float* d = C + (size_t)t * N + off;
+                float inv = (mxc[t] > 1e-30f ? mxc[t] : 1e-30f) / Mc;
+                const float* rsc = &rs[(size_t)c * N + off];
+                for (int i = 0; i < mp[p]; i++) d[i] += (s[i] * inv) * rsc[i];
+            }
+            off += mp[p];
+        }
+    }
+    g_t_gemm += vnow() - t0;
+}
+
+// C[M,N] = A[M,K] · B[N,K]^T   (B 已分块 int8 上卡, 每块每行 scale w.rs)
+static void vgemm(const VW& w, const float* A, int M, float* C) {
+    int K = w.K, N = w.N;
+    if (w.N <= 0 || w.K <= 0 || M <= 0) { printf("[vis] FATAL: 形状非法\n"); exit(1); }
+    if ((size_t)M * w.cs[0] * 4 > g_vAsz) { printf("[vis] FATAL: A 越界 M=%d cs=%d (缓冲 %zu B)\n", M, w.cs[0], g_vAsz); exit(1); }
+    if ((size_t)M * w.mp[0] > g_vCsz / 4) { printf("[vis] FATAL: C 越界 M=%d n=%d\n", M, w.mp[0]); exit(1); }
+    if (g_vcpugemm) {   // 主机 double 参考: 精确激活 × 与卡上同一份分块量化权重
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < M; t++) { float* c = C + (size_t)t * N; for (int n = 0; n < N; n++) c[n] = 0.f; }
+        for (int c = 0; c < w.nc; c++) {
+            int cs_ = w.cs[c], k0 = w.koff[c];
+            const signed char* qb = w.qhost.data() + w.coff[0][c];
+            const float* rsc = &w.rs[(size_t)c * N];
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < M; t++) {
+                const float* a = A + (size_t)t * K + k0; float* d = C + (size_t)t * N;
+                for (int n = 0; n < N; n++) {
+                    const signed char* qr = qb + (size_t)n * cs_;
+                    double acc = 0;
+                    for (int j = 0; j < cs_; j++) acc += (double)a[j] * (double)qr[j];
+                    d[n] += (float)(acc * (double)rsc[n]);
+                }
+            }
+        }
+        return;
+    }
+    std::vector<const int8_t*> bd((size_t)w.ns * w.nc, nullptr);
+    for (int p = 0; p < w.ns; p++)
+        for (int c = 0; c < w.nc; c++)
+            bd[(size_t)p * w.nc + c] = (const int8_t*)w.d[p] + w.coff[p][c];
+    vgemm_chunked(N, K, w.nc, w.cs, w.koff, w.rs, bd.data(), w.ns, w.mp, w.dev, A, M, C);
+}
+
+// 运行时矩阵当 int8 B (分块打包, 每块每行 scale): C[M,N] = A[M,K] · B[N,K]^T
+//   qpack 布局 = [c][n][k] (由 vquant_chunked / vpack_T 产生)
+static void vgemm_dynB(const std::vector<signed char>& qpack, const std::vector<float>& rs,
+                       int N, int K, const std::vector<int>& cs, const std::vector<int>& koff,
+                       const float* A, int M, float* C) {
+    int nc = (int)cs.size();
+    if ((int)qpack.size() != N * K) { printf("[vis] FATAL: dynB 打包尺寸 %zu != %d\n", qpack.size(), N * K); exit(1); }
+    if (g_vcpugemm) {
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < M; t++) { float* c = C + (size_t)t * N; for (int n = 0; n < N; n++) c[n] = 0.f; }
+        size_t base = 0;
+        for (int c = 0; c < nc; c++) {
+            int cs_ = cs[c], k0 = koff[c];
+            const signed char* qb = qpack.data() + base;
+            const float* rsc = &rs[(size_t)c * N];
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < M; t++) {
+                const float* a = A + (size_t)t * K + k0; float* d = C + (size_t)t * N;
+                for (int n = 0; n < N; n++) {
+                    const signed char* qr = qb + (size_t)n * cs_;
+                    double acc = 0;
+                    for (int j = 0; j < cs_; j++) acc += (double)a[j] * (double)qr[j];
+                    d[n] += (float)(acc * (double)rsc[n]);
+                }
+            }
+            base += (size_t)N * cs_;
+        }
+        return;
+    }
+    int ns = (N >= 64 && N % 2 == 0) ? 2 : 1;
+    int mp[2] = {ns == 2 ? N / 2 : N, ns == 2 ? N - N / 2 : 0};
+    int devs[2] = {0, 1};
+    if ((size_t)mp[0] * K > g_vBsz) { printf("[vis] FATAL: Bd 越界 n=%d K=%d\n", mp[0], K); exit(1); }
+    std::vector<size_t> cbase(nc, 0);
+    { size_t o = 0; for (int c = 0; c < nc; c++) { cbase[c] = o; o += (size_t)N * cs[c]; } }
+    std::vector<const int8_t*> bd((size_t)ns * nc, nullptr);
+    std::vector<signed char> tmp;
+    for (int p = 0; p < ns; p++) {
+        int dv = devs[p], n0 = (p == 0) ? 0 : mp[0];
+        xpu_set_device(dv);
+        size_t o = 0;
+        for (int c = 0; c < nc; c++) {
+            int cs_ = cs[c];
+            size_t by = (size_t)mp[p] * cs_;
+            bd[(size_t)p * nc + c] = (const int8_t*)g_vBd[dv] + o;
+            tmp.resize(by);
+            for (int n = 0; n < mp[p]; n++)
+                memcpy(&tmp[(size_t)n * cs_], qpack.data() + cbase[c] + (size_t)(n0 + n) * cs_, cs_);
+            if (xpu_memcpy((char*)g_vBd[dv] + o, tmp.data(), by, XPU_HOST_TO_DEVICE)) { printf("[vis] FATAL: H2D dynB\n"); exit(1); }
+            o += by;
+        }
+    }
+    vgemm_chunked(N, K, nc, cs, koff, rs, bd.data(), ns, mp, devs, A, M, C);
+}
+
+// 行优先 W[N,K] -> 分块打包 int8 [c][n][k] + 每块每行 scale
+static void vquant_chunked(const float* W, int N, int K, int CH,
+                           std::vector<signed char>& qpack, std::vector<float>& rs,
+                           std::vector<int>& cs, std::vector<int>& koff) {
+    vchunks(K, CH, cs, koff);
+    int nc = (int)cs.size();
+    rs.assign((size_t)nc * N, 0.f);
+    qpack.resize((size_t)N * K);
+    size_t o = 0;
+    for (int c = 0; c < nc; c++) {
+        int cs_ = cs[c], k0 = koff[c];
+        #pragma omp parallel for schedule(static)
+        for (int n = 0; n < N; n++) {
+            const float* r = W + (size_t)n * K + k0;
+            float am = 0;
+            for (int j = 0; j < cs_; j++) { float a = fabsf(r[j]); if (a > am) am = a; }
+            float s = am / 127.f; if (s <= 1e-30f) s = 1e-8f;
+            rs[(size_t)c * N + n] = s;
+            signed char* dq = qpack.data() + o + (size_t)n * cs_;
+            for (int j = 0; j < cs_; j++) { int v = (int)lrintf(r[j] / s); if (v > 127) v = 127; else if (v < -127) v = -127; dq[j] = (signed char)v; }
+        }
+        o += (size_t)N * cs_;
+    }
+}
+
+// 把 [T,D] 转置量化成 B = [D][T] 的分块打包 (每行 = 一个 d, 行内 = T 个 t) —— 用于 V
+static void vpack_T(const float* M, int T, int D, int CH,
+                    std::vector<signed char>& qpack, std::vector<float>& rs,
+                    std::vector<int>& cs, std::vector<int>& koff) {
+    static std::vector<float> tmp;
+    tmp.resize((size_t)D * T);
+    #pragma omp parallel for schedule(static)
+    for (int t = 0; t < T; t++)
+        for (int d = 0; d < D; d++) tmp[(size_t)d * T + t] = M[(size_t)t * D + d];
+    vquant_chunked(tmp.data(), D, T, CH, qpack, rs, cs, koff);
+}
+
+// 兼容旧接口: 分块量化 + 还原成 [N,K] 行优先 (只关心 q/rs 时用)
+static void vquant_row(const float* W, int N, int K, std::vector<signed char>& q, std::vector<float>& rs) {
+    std::vector<signed char> pack; std::vector<int> cs, koff;
+    vquant_chunked(W, N, K, g_vcha, pack, rs, cs, koff);
+    q.resize((size_t)N * K);
+    size_t o = 0;
+    for (size_t c = 0; c < cs.size(); c++) {
+        int cs_ = cs[c];
+        #pragma omp parallel for schedule(static)
+        for (int n = 0; n < N; n++)
+            memcpy(&q[(size_t)n * K + koff[c]], &pack[o + (size_t)n * cs_], cs_);
+        o += (size_t)N * cs_;
+    }
+}
+
+// ============================================================================
+// 3. 主机逐元素算子
+// ============================================================================
+static inline float vgelu(float x) {
+    return 0.5f * x * (1.0f + tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x)));
+}
+// X: [VNE, T] (i + VNE*t), 每列做 LayerNorm
+static void vlayernorm(const float* X, const float* w, const float* b, float* Y, int T) {
+    #pragma omp parallel for schedule(static)
+    for (int t = 0; t < T; t++) {
+        const float* x = X + (size_t)t * VNE;
+        float s = 0;
+        for (int i = 0; i < VNE; i++) s += x[i];
+        float mean = s / VNE;
+        float v = 0;
+        for (int i = 0; i < VNE; i++) { float dd = x[i] - mean; v += dd * dd; }
+        v /= VNE;
+        float sc = 1.0f / sqrtf(v + VEPS);
+        float* y = Y + (size_t)t * VNE;
+        for (int i = 0; i < VNE; i++) y[i] = (x[i] - mean) * sc * w[i] + b[i];
+    }
+}
+// token 排列: 合并链路 (permute/cont/reshape/permute/cont) 的等价显式形式
+//   结果[i][t] = 输入网格 grid( w(t), h(t) )[i]
+static inline void tok_xy(int t, int OW, int OH, int& w, int& h) {
+    int j2 = (t / 4) % (OW / 2);
+    int j1 = (t / 2) % 2;
+    int j3 = t / (2 * OW);
+    w = ((t % 2) + 2 * j2) % OW;
+    h = 2 * j3 + j1;
+    if (h >= OH) h = OH - 1;
+}
+// M-RoPE (vision): cache 累积方式与 ggml 一致
+static void vrope(float* Q, const int* prow, const int* pcol, int T) {
+    const float ts = powf(10000.f, -2.f / 36.f);
+    #pragma omp parallel for schedule(static)
+    for (int t = 0; t < T; t++) {
+        for (int h = 0; h < VNH; h++) {
+            float* v = Q + (size_t)(h * VDH) + (size_t)VNE * t;
+            float tt = (float)prow[t], th = (float)pcol[t];
+            float out[VDH];
+            for (int ic = 0; ic < 36; ic++) {
+                float theta;
+                if (ic < 18) { theta = tt; tt *= ts; } else { theta = th; th *= ts; }
+                float c = cosf(theta), s = sinf(theta);
+                float a0 = v[ic], a1 = v[ic + 36];
+                out[ic] = a0 * c - a1 * s;
+                out[ic + 36] = a0 * s + a1 * c;
+            }
+            memcpy(v, out, sizeof(out));
+        }
+    }
+}
+
+// ============================================================================
+// 4. 视觉塔前向
+// ============================================================================
+static VG g_vg;
+static int g_vinit = 0;
+static VW g_Wpatch, g_Wqkv[VNL], g_Wo[VNL], g_Wup[VNL], g_Wdn[VNL], g_Wmm0, g_Wmm2;
+static std::vector<float> g_bpatch, g_bln1w[VNL], g_bln1b[VNL], g_bln2w[VNL], g_bln2b[VNL],
+                          g_bqkv[VNL], g_bo[VNL], g_bup[VNL], g_bdn[VNL], g_bpostw, g_bpostb,
+                          g_bmm0, g_bmm2;
+
+int vis_loaded() { return g_vinit; }
+
+int vis_init(const char* path) {
+    if (g_vinit) return 0;
+    if (getenv("VIS_CPUGEMM")) { g_vcpugemm = atoi(getenv("VIS_CPUGEMM")); printf("[vis] ★ VIS_CPUGEMM=%d (调试: 主机参考 GEMM, 不占卡)\n", g_vcpugemm); }
+    if (g_vcpugemm) { g_vAsz = g_vCsz = g_vBsz = (size_t)1 << 32; }   // 调试模式不占卡
+    g_vch = getenv("VIS_CH") ? atoi(getenv("VIS_CH")) : 96;
+    g_vcha = getenv("VIS_CHA") ? atoi(getenv("VIS_CHA")) : 24;
+    if (g_vch <= 0) g_vch = 1 << 20;      // <=0 => 不分块 (退回旧行为)
+    if (g_vcha <= 0) g_vcha = 1 << 20;
+    printf("[vis] ★ 激活量化修正: K 分块 CH=%d (注意力小 K 用 %d)%s\n", g_vch, g_vcha,
+           g_vcpugemm ? "  [CPUGEMM 调试]" : "");
+    if (!g_vcpugemm) for (int dv = 0; dv < 2; dv++) {
+        xpu_set_device(dv);
+        // ★ 先分配临时缓冲 (低地址), 再灌权重 — 文本引擎同款规避策略
+        if (xpu_malloc(&g_vxA[dv], (size_t)VMA_MAX * VKMAX * 4)) { printf("[vis] FATAL: alloc A chip%d\n", dv); return 1; }
+        if (xpu_malloc(&g_vyC[dv], (size_t)VMA_MAX * VKMAX * 4)) { printf("[vis] FATAL: alloc C chip%d\n", dv); return 1; }
+        if (xpu_malloc(&g_vBd[dv], (size_t)VTMAX * 4096)) { printf("[vis] FATAL: alloc Bd chip%d\n", dv); return 1; }
+        g_vctx[dv] = new api::Context(api::Device(api::DeviceType::XPU1, dv));
+        g_vAsz = (size_t)VMA_MAX * VKMAX * 4; g_vCsz = g_vAsz; g_vBsz = (size_t)VTMAX * 4096;
+    }
+    if (!g_vg.open(path)) return 1;
+    std::vector<float> W;
+    printf("[vis] 加载视觉塔权重 (int8 每行 + 每行 scale) ...\n");
+    // patch conv: W_eff = W0 + W1  -> [1152, 768]
+    {
+        std::vector<float> w0, w1;
+        if (!g_vg.read_f32("v.patch_embd.weight", w0)) return 1;
+        if (!g_vg.read_f32("v.patch_embd.weight.1", w1)) return 1;
+        if (w0.size() != w1.size()) { printf("[vis] FATAL: patch conv 形状不符\n"); return 1; }
+        for (size_t i = 0; i < w0.size(); i++) w0[i] += w1[i];
+        vw_from_f32(w0, VNE, 768, g_Wpatch);
+        if (!g_vg.read_f32("v.patch_embd.bias", g_bpatch)) return 1;
+    }
+    for (int il = 0; il < VNL; il++) {
+        char nm[128];
+        #define VLOAD_WI(field, suffix, N_, K_) { \
+            snprintf(nm, sizeof(nm), "v.blk.%d.%s.weight", il, suffix); \
+            if (!g_vg.read_f32(nm, W)) return 1; \
+            if ((int)W.size() != (N_) * (K_)) { printf("[vis] FATAL: %s 形状 %zu != %d*%d\n", nm, W.size(), (N_), (K_)); return 1; } \
+            vw_from_f32(W, (N_), (K_), field[il]); }
+        VLOAD_WI(g_Wqkv, "attn_qkv", VNE * 3, VNE);
+        VLOAD_WI(g_Wo,   "attn_out", VNE, VNE);
+        VLOAD_WI(g_Wup,  "ffn_up",   VFFN, VNE);
+        VLOAD_WI(g_Wdn,  "ffn_down", VNE, VFFN);
+        #undef VLOAD_WI
+        #define VLOAD_V(vec, suffix) { snprintf(nm, sizeof(nm), "v.blk.%d.%s", il, suffix); if (!g_vg.read_f32(nm, vec[il])) return 1; }
+        VLOAD_V(g_bln1w, "ln1.weight"); VLOAD_V(g_bln1b, "ln1.bias");
+        VLOAD_V(g_bln2w, "ln2.weight"); VLOAD_V(g_bln2b, "ln2.bias");
+        VLOAD_V(g_bqkv, "attn_qkv.bias"); VLOAD_V(g_bo, "attn_out.bias");
+        VLOAD_V(g_bup, "ffn_up.bias"); VLOAD_V(g_bdn, "ffn_down.bias");
+        #undef VLOAD_V
+    }
+    {
+        std::vector<float> pw;
+        if (!g_vg.read_f32("v.post_ln.weight", g_bpostw)) return 1;
+        if (!g_vg.read_f32("v.post_ln.bias", g_bpostb)) return 1;
+        if (!g_vg.read_f32("mm.0.weight", W)) return 1;
+        vw_from_f32(W, 4608, 4608, g_Wmm0);
+        if (!g_vg.read_f32("mm.0.bias", g_bmm0)) return 1;
+        if (!g_vg.read_f32("mm.2.weight", W)) return 1;
+        vw_from_f32(W, 4096, 4608, g_Wmm2);
+        if (!g_vg.read_f32("mm.2.bias", g_bmm2)) return 1;
+    }
+    printf("[vis] 权重点卡完成: chip0 %.0f MB, chip1 %.0f MB\n", g_vhbm[0] / 1048576.0, g_vhbm[1] / 1048576.0);
+    g_vinit = 1;
+    return 0;
+}
+
+static void vdump(const char* dir, const char* name, const float* p, size_t n) {
+    if (!dir || !dir[0]) return;
+    char path[512]; snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE* f = fopen(path, "wb");
+    if (!f) { printf("[vis] WARN: 打不开 dump %s\n", path); return; }
+    fwrite(p, 4, n, f); fclose(f);
+}
+
+// 头部: patch conv + 位置编码 -> X[VNE, T]
+static int vis_head(const float* in, int W, int H, int ow, int oh, int T,
+                    const std::vector<int>& tw, const std::vector<int>& th,
+                    std::vector<float>& X, const char* dumpdir) {
+    std::vector<float> cols((size_t)T * 768);
+    for (int oy = 0; oy < oh; oy++)
+        for (int ox = 0; ox < ow; ox++) {
+            float* c = &cols[((size_t)ox + (size_t)ow * oy) * 768];
+            for (int ic = 0; ic < 3; ic++)
+                for (int kh = 0; kh < 16; kh++)
+                    for (int kw = 0; kw < 16; kw++)
+                        c[ic * 256 + kh * 16 + kw] = in[(ox * 16 + kw) + (size_t)W * (oy * 16 + kh) + (size_t)W * H * ic];
+        }
+    vdump(dumpdir, "cols.f32", cols.data(), cols.size());
+    std::vector<float> conv((size_t)T * VNE);
+    vgemm(g_Wpatch, cols.data(), T, conv.data());
+    // 位置编码网格 (F32): 表 [1152, 2304], p = 48*y + x -> grid[x][y][c]
+    std::vector<float> pw;
+    if (!g_vg.read_f32("v.position_embd.weight", pw)) return 1;
+    const int NS = 48;
+    static std::vector<float> grid, g2;
+    grid.assign((size_t)NS * NS * VNE, 0.f);
+    for (int y = 0; y < NS; y++)
+        for (int x = 0; x < NS; x++)
+            memcpy(&grid[((size_t)x + (size_t)NS * y) * VNE], &pw[(size_t)(48 * y + x) * VNE], VNE * 4);
+    const float* use = grid.data(); int uh = NS;
+    if (ow != NS || oh != NS) {
+        g2.resize((size_t)ow * oh * VNE);
+        float sf0 = (float)(ow - 1) / (NS - 1), sf1 = (float)(oh - 1) / (NS - 1);
+        for (int i = 0; i < ow; i++) {
+            float x = i / sf0; int x0 = (int)floorf(x); int x1 = x0 + 1;
+            if (x0 < 0) x0 = 0; if (x0 > NS - 1) x0 = NS - 1;
+            if (x1 < 0) x1 = 0; if (x1 > NS - 1) x1 = NS - 1;
+            float dx = x - x0; if (dx < 0) dx = 0; if (dx > 1) dx = 1;
+            for (int j = 0; j < oh; j++) {
+                float y = j / sf1; int y0 = (int)floorf(y); int y1 = y0 + 1;
+                if (y0 < 0) y0 = 0; if (y0 > NS - 1) y0 = NS - 1;
+                if (y1 < 0) y1 = 0; if (y1 > NS - 1) y1 = NS - 1;
+                float dy = y - y0; if (dy < 0) dy = 0; if (dy > 1) dy = 1;
+                const float* A = &grid[((size_t)x0 + (size_t)NS * y0) * VNE];
+                const float* B = &grid[((size_t)x1 + (size_t)NS * y0) * VNE];
+                const float* C = &grid[((size_t)x0 + (size_t)NS * y1) * VNE];
+                const float* D = &grid[((size_t)x1 + (size_t)NS * y1) * VNE];
+                float* o = &g2[((size_t)i + (size_t)ow * j) * VNE];
+                for (int c = 0; c < VNE; c++)
+                    o[c] = A[c] * (1 - dx) * (1 - dy) + B[c] * dx * (1 - dy) + C[c] * (1 - dx) * dy + D[c] * dx * dy;
+            }
+        }
+        use = g2.data(); uh = oh;
+    }
+    (void)uh;
+    X.assign((size_t)VNE * T, 0.f);
+    #pragma omp parallel for schedule(static)
+    for (int t = 0; t < T; t++) {
+        const float* cv = &conv[((size_t)tw[t] + (size_t)ow * th[t]) * VNE];
+        const float* pv = &use[((size_t)tw[t] + (size_t)ow * th[t]) * VNE];
+        float* x = &X[(size_t)VNE * t];
+        for (int i = 0; i < VNE; i++) x[i] = cv[i] + g_bpatch[i] + pv[i];
+    }
+    vdump(dumpdir, "conv.f32", conv.data(), conv.size());
+    vdump(dumpdir, "gridi.f32", use, (size_t)ow * oh * VNE);
+    {   // 排列落盘 (w,h per token)
+        static std::vector<float> mw, mh;
+        mw.resize(T); mh.resize(T);
+        for (int t = 0; t < T; t++) { mw[t] = (float)tw[t]; mh[t] = (float)th[t]; }
+        vdump(dumpdir, "mapw.f32", mw.data(), T);
+        vdump(dumpdir, "maph.f32", mh.data(), T);
+    }
+    vdump(dumpdir, "inp.f32", X.data(), X.size());
+    return 0;
+}
+
+int vis_forward(const float* in, int W, int H, std::vector<float>& out, int& n_tok, const char* dumpdir) {
+    if (!g_vinit) { printf("[vis] FATAL: 未初始化\n"); return 1; }
+    double t_all = vnow();
+    if (W % 16 || H % 16) { printf("[vis] FATAL: 尺寸必须是 16 的倍数 (%d %d)\n", W, H); return 1; }
+    int ow = W / 16, oh = H / 16, T = ow * oh;
+    if (T > VMA_MAX) { printf("[vis] FATAL: patch 数 %d > 上限 %d\n", T, VMA_MAX); return 1; }
+    if (T % 4) { printf("[vis] FATAL: patch 数不是 4 的倍数\n"); return 1; }
+    n_tok = T / 4;
+    printf("[vis] 前向: %dx%d -> %dx%d patch = %d (合并后 %d token)\n", W, H, ow, oh, T, n_tok);
+    std::vector<int> tw(T), th(T), prow(T), pcol(T);
+    for (int t = 0; t < T; t++) { int w, h; tok_xy(t, ow, oh, w, h); tw[t] = w; th[t] = h; prow[t] = h; pcol[t] = w; }
+    std::vector<float> X;
+    double t0 = vnow();
+    if (vis_head(in, W, H, ow, oh, T, tw, th, X, dumpdir)) return 1;
+    printf("[vis]   head %.3fs\n", vnow() - t0);
+    std::vector<float> Y((size_t)VNE * T), qkv((size_t)T * 3 * VNE), Qb((size_t)VNE * T), Kb((size_t)VNE * T), Vb((size_t)VNE * T);
+    std::vector<float> Sm((size_t)T * T), C2((size_t)T * VDH), Ao((size_t)VNE * T), Up((size_t)T * VFFN), Dn((size_t)T * VNE);
+    std::vector<float> qt, kt, vt, rs2, rs3;
+    std::vector<signed char> qq, qk, qv;
+    std::vector<int> csA, koA, csB, koB;   // ★ 分块表 (注意力路径)
+    if (getenv("VIS_ONLY")) { g_vonly = atoi(getenv("VIS_ONLY")); }
+    for (int il = 0; il < VNL && il < g_vonly; il++) {
+        double tl = vnow();
+        vlayernorm(X.data(), g_bln1w[il].data(), g_bln1b[il].data(), Y.data(), T);
+        vgemm(g_Wqkv[il], Y.data(), T, qkv.data());
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < T; t++) {
+            const float* s = &qkv[(size_t)t * 3 * VNE];
+            for (int i = 0; i < VNE; i++) {
+                Qb[(size_t)i + (size_t)VNE * t] = s[i] + g_bqkv[il][i];
+                Kb[(size_t)i + (size_t)VNE * t] = s[VNE + i] + g_bqkv[il][VNE + i];
+                Vb[(size_t)i + (size_t)VNE * t] = s[2 * VNE + i] + g_bqkv[il][2 * VNE + i];
+            }
+        }
+        vrope(Qb.data(), prow.data(), pcol.data(), T);
+        vrope(Kb.data(), prow.data(), pcol.data(), T);
+        if (il == 0) { vdump(dumpdir, "l0_qb.f32", Qb.data(), Qb.size()); vdump(dumpdir, "l0_kb.f32", Kb.data(), Kb.size()); vdump(dumpdir, "l0_vb.f32", Vb.data(), Vb.size()); }
+        // 逐 head attention: S[qt][kt] = Q·K^T ; O[d][qt] = V·Sm ; 走 gemm_int8
+        qt.resize((size_t)T * VDH); kt.resize((size_t)T * VDH); vt.resize((size_t)T * VDH);
+        for (int h = 0; h < VNH; h++) {
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < T; t++) {
+                memcpy(&qt[(size_t)t * VDH], &Qb[(size_t)(h * VDH) + (size_t)VNE * t], VDH * 4);
+                memcpy(&kt[(size_t)t * VDH], &Kb[(size_t)(h * VDH) + (size_t)VNE * t], VDH * 4);
+                memcpy(&vt[(size_t)t * VDH], &Vb[(size_t)(h * VDH) + (size_t)VNE * t], VDH * 4);
+            }
+            vquant_chunked(kt.data(), T, VDH, g_vcha, qk, rs2, csA, koA);
+            vgemm_dynB(qk, rs2, T, VDH, csA, koA, qt.data(), T, Sm.data());     // Sm[qt][kt]
+            static int h_dumped = 0;
+            if (il == 0 && h < 2 && dumpdir && dumpdir[0]) { char hn[64]; snprintf(hn, sizeof(hn), "l0_sm%d.f32", h); vdump(dumpdir, hn, Sm.data(), Sm.size()); }
+            if (il == 0 && h == 0 && dumpdir && dumpdir[0]) { vdump(dumpdir, "l0_qt0.f32", qt.data(), qt.size()); h_dumped = 1; }
+            const float sq = 1.0f / sqrtf((float)VDH);
+            #pragma omp parallel for schedule(static)
+            for (int q = 0; q < T; q++) {
+                float* r = &Sm[(size_t)q * T];
+                float mx = -1e30f;
+                for (int k = 0; k < T; k++) { float v = r[k] * sq; r[k] = v; if (v > mx) mx = v; }
+                float s = 0;
+                for (int k = 0; k < T; k++) { float e = expf(r[k] - mx); r[k] = e; s += e; }
+                float inv = 1.0f / s;
+                for (int k = 0; k < T; k++) r[k] *= inv;
+            }
+            // O^T[qt][d] = Σ_t Sm[qt][t] · V[t][d]  (B = V 的行 d, 每行 scale)
+            vpack_T(vt.data(), T, VDH, g_vch, qv, rs3, csB, koB);      // B[d][t] = V[t][d]
+            vgemm_dynB(qv, rs3, VDH, T, csB, koB, Sm.data(), T, C2.data());     // C2[qt][d]
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < T; t++)
+                for (int d = 0; d < VDH; d++)
+                    Ao[(size_t)(h * VDH + d) + (size_t)VNE * t] = C2[(size_t)t * VDH + d];
+        }
+        if (il == 0) vdump(dumpdir, "l0_ao.f32", Ao.data(), Ao.size());
+        std::vector<float> Wost((size_t)T * VNE), Aot((size_t)VNE * T);
+        {   // attn_out = Wo · O + bo
+            std::vector<float> O((size_t)T * VNE);
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < T; t++)
+                for (int i = 0; i < VNE; i++) O[(size_t)t * VNE + i] = Ao[(size_t)i + (size_t)VNE * t];
+            if (il == 0) vdump(dumpdir, "l0_o.f32", O.data(), O.size());
+        vgemm(g_Wo[il], O.data(), T, Wost.data());
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < T; t++)
+                for (int i = 0; i < VNE; i++) Aot[(size_t)i + (size_t)VNE * t] = Wost[(size_t)t * VNE + i] + g_bo[il][i];
+        }
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < X.size(); i++) X[i] += Aot[i];
+        vlayernorm(X.data(), g_bln2w[il].data(), g_bln2b[il].data(), Y.data(), T);
+        if (il == 0 && dumpdir && dumpdir[0]) vdump(dumpdir, "ln2_0.f32", Y.data(), Y.size());
+        vgemm(g_Wup[il], Y.data(), T, Up.data());
+        if (il == 0) vdump(dumpdir, "l0_up.f32", Up.data(), Up.size());
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < Up.size(); i++) Up[i] = vgelu(Up[i] + g_bup[il][i % VFFN]);
+        vgemm(g_Wdn[il], Up.data(), T, Dn.data());
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < T; t++)
+            for (int i = 0; i < VNE; i++) X[(size_t)i + (size_t)VNE * t] += Dn[(size_t)t * VNE + i] + g_bdn[il][i];
+        printf("[vis]   层 %2d  %.3fs (gemm 累计 %.2fs host %.2fs)\n", il, vnow() - tl, g_t_gemm, g_t_host);
+        if (dumpdir && dumpdir[0]) {
+            char nm[64]; snprintf(nm, sizeof(nm), "layer%d.f32", il);
+            if (il == 0 || il == VNL - 1 || il + 1 == g_vonly) vdump(dumpdir, nm, X.data(), X.size());
+        }
+    }
+    if (g_vonly < VNL) { printf("[vis] 调试: 只跑 %d 层, 到此为止\n", g_vonly); return 0; }
+    // post_ln
+    std::vector<float> Xp((size_t)VNE * T);
+    vlayernorm(X.data(), g_bpostw.data(), g_bpostb.data(), Xp.data(), T);
+    vdump(dumpdir, "postln.f32", Xp.data(), Xp.size());
+    // merger: [VNE,T] -> [4608, T/4] -> mm.0 -> gelu -> mm.2 -> [4096, T/4]
+    int nt = T / 4;
+    std::vector<float> E((size_t)nt * 4608);
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < nt; j++)
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < VNE; c++)
+                E[(size_t)j * 4608 + 1152 * r + c] = Xp[(size_t)c + (size_t)VNE * (4 * j + r)];
+    std::vector<float> Hg((size_t)nt * 4608), Emb((size_t)nt * 4096);
+    vgemm(g_Wmm0, E.data(), nt, Hg.data());
+    #pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < Hg.size(); i++) Hg[i] = vgelu(Hg[i] + g_bmm0[i % 4608]);
+    vgemm(g_Wmm2, Hg.data(), nt, Emb.data());
+    out.resize((size_t)nt * 4096);
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < nt; j++)
+        for (int o = 0; o < 4096; o++) out[(size_t)o + (size_t)4096 * j] = Emb[(size_t)j * 4096 + o] + g_bmm2[o];
+    if (dumpdir && dumpdir[0]) {
+        char path[512]; snprintf(path, sizeof(path), "%s/emb.bin", dumpdir);
+        FILE* f = fopen(path, "wb");
+        if (f) { int32_t hd[2] = {nt, 4096}; fwrite(hd, 4, 2, f); fwrite(out.data(), 4, out.size(), f); fclose(f); }
+    }
+    printf("[vis] 完成: %d token, 总耗时 %.2fs (gemm %.2fs, host %.2fs)\n", n_tok, vnow() - t_all, g_t_gemm, g_t_host);
+    return 0;
+}
+
+// ============================================================================
+// 5. 上卡前的极小尺寸 gemm_int8 自检 (把卡打进过 ERROR 的调用绝不碰)
+// ============================================================================
+// 单个尺寸的分块 gemm 自检: 同时报"对精确 f32"与"对精确激活×分块量化权重"
+static int vselftest_one(int M, int NN, int K, int CH) {
+    std::vector<float> A((size_t)M * K), B((size_t)NN * K), C((size_t)M * NN);
+    for (size_t i = 0; i < A.size(); i++) A[i] = sinf(i * 0.01f) * 0.7f;
+    for (size_t i = 0; i < B.size(); i++) B[i] = cosf(i * 0.003f) * (1.f + 2.f * ((i % 97) == 0));
+    std::vector<signed char> Bq; std::vector<float> Brs; std::vector<int> cs, koff;
+    vquant_chunked(B.data(), NN, K, CH, Bq, Brs, cs, koff);
+    std::vector<float> ref((size_t)M * NN, 0.f), ref2((size_t)M * NN, 0.f);
+    #pragma omp parallel for schedule(static)
+    for (int m = 0; m < M; m++)
+        for (int n = 0; n < NN; n++) {
+            double acc = 0, acc2 = 0;
+            size_t base = 0;
+            for (size_t c = 0; c < cs.size(); c++) {
+                for (int j = 0; j < cs[c]; j++) {
+                    acc  += (double)A[(size_t)m * K + koff[c] + j] * (double)B[(size_t)n * K + koff[c] + j];
+                    acc2 += (double)A[(size_t)m * K + koff[c] + j] * (double)Bq[base + (size_t)n * cs[c] + j] * (double)Brs[c * NN + n];
+                }
+                base += (size_t)NN * cs[c];
+            }
+            ref[(size_t)m * NN + n] = (float)acc; ref2[(size_t)m * NN + n] = (float)acc2;
+        }
+    vgemm_dynB(Bq, Brs, NN, K, cs, koff, A.data(), M, C.data());
+    double se = 0, se2 = 0, s2 = 0;
+    for (size_t i = 0; i < (size_t)M * NN; i++) {
+        double d = C[i] - ref[i], d2 = C[i] - ref2[i];
+        se += d * d; se2 += d2 * d2; s2 += (double)ref[i] * ref[i];
+    }
+    double rr  = 100.0 * sqrt(se  / (s2 > 0 ? s2 : 1e-30));
+    double rr2 = 100.0 * sqrt(se2 / (s2 > 0 ? s2 : 1e-30));
+    printf("[vis] ★ 分块 gemm 自检 m=%d n=%d k=%d CH=%d (块数 %zu, ldb=k=cs): "
+           "对精确值 %.4f%% | 对'精确激活×分块量化权重' %.4f%%  y0=%.5f ref0=%.5f\n",
+           M, NN, K, CH, cs.size(), rr, rr2, C[0], ref[0]);
+    return (rr < 3.0) ? 0 : 1;
+}
+
+int vis_gemm_selftest() {
+    if (getenv("VIS_CPUGEMM")) { printf("[vis] selftest 跳过 (CPUGEMM 模式)\n"); return 0; }
+    g_vch = getenv("VIS_CH") ? atoi(getenv("VIS_CH")) : 96;
+    g_vcha = getenv("VIS_CHA") ? atoi(getenv("VIS_CHA")) : 24;
+    if (g_vch <= 0) g_vch = 1 << 20;
+    if (g_vcha <= 0) g_vcha = 1 << 20;
+    for (int dv = 0; dv < 2; dv++) {
+        xpu_set_device(dv);
+        if (xpu_malloc(&g_vxA[dv], (size_t)64 * 1024 * 4) || xpu_malloc(&g_vyC[dv], (size_t)64 * 256 * 4) ||
+            xpu_malloc(&g_vBd[dv], (size_t)256 * 1024)) { printf("[vis] selftest alloc fail\n"); return 1; }
+        g_vAsz = (size_t)64 * 1024 * 4; g_vCsz = (size_t)64 * 256 * 4; g_vBsz = (size_t)256 * 1024;
+        g_vctx[dv] = new api::Context(api::Device(api::DeviceType::XPU1, dv));
+    }
+    int rc = 0;
+    rc |= vselftest_one(8, 64, 768, g_vch);    // 与 patch conv 的 K 同量级
+    rc |= vselftest_one(8, 64, 72, g_vcha);    // ★ 注意力小 K (ldb=k=cs) —— 与塔内实际路径一致
+    printf("[vis] selftest 总结论: %s\n", rc ? "FAIL" : "PASS");
+    return rc;
+}
+

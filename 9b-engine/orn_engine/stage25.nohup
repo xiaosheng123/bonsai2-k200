@@ -1,0 +1,155 @@
+=== stage25 开始 2026-09-22 14:56:37 | 异常起 = 18 | reset 5/5 ===
+--- [1] 卡上自检 cardAtest (含分母夹逼 + eps 源缓冲修复) ---
+########## p_self 14:56:45 ##########
+[stage25] p_self safe_run rc=0
+--- [2] ★ VIS_ONLY=27 (全 27 层, 含第 21 层) CARDFFN=1 ---
+########## only27c 14:56:47 ##########
+[stage25] only27c safe_run rc=0
+--- [3] VIS_ONLY=27 CARDFFN=0 (基线, 逐层耗时对照) ---
+########## only27b 14:57:05 ##########
+[stage25] only27b safe_run rc=0
+--- [4] 768² 参考档 CARDFFN=0 (生产行为基线, 落盘) ---
+########## n768ref 14:57:26 ##########
+[stage25] n768ref safe_run rc=0
+--- [5] 768² FFN 全卡档 CARDFFN=1 (落盘) ---
+########## n768card 14:57:48 ##########
+[stage25] n768card safe_run rc=0
+--- [6] 512² 参考档 CARDFFN=0 (落盘) ---
+########## n512ref 14:58:07 ##########
+[stage25] n512ref safe_run rc=0
+--- [7] 512² FFN 全卡档 CARDFFN=1 (落盘) ---
+########## n512card 14:58:18 ##########
+[stage25] n512card safe_run rc=0
+
+=========== 对拍 1: 768² 参考档(CARDFFN=0) vs 第21轮生产落盘 /tmp/vs23/n768 (期望 13/13 字节全同) ===========
+==============================================================================
+768 ref(CARDFFN=0) vs ch21生产落盘   新=/tmp/vs25/n768/ref   参=/tmp/vs23/n768
+  l0_qb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_kb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_vb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_qt0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/165888
+  l0_sm0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/5308416
+  l0_sm1.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/5308416
+  l0_ao.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_o.f32       字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_up.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/9916416
+  ln2_0.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  layer0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  layer26.f32    字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  emb.bin        字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2359296
+  ---- 汇总: 可比文件 13 个, 字节全同 13, 有差 0 ----
+=========== 对拍 2: 768² 全卡档(CARDFFN=1) vs 768² 参考档 ===========
+==============================================================================
+768 card(CARDFFN=1) vs ref   新=/tmp/vs25/n768/card   参=/tmp/vs25/n768/ref
+  l0_qb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_kb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_vb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_qt0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/165888
+  l0_sm0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/5308416
+  l0_sm1.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/5308416
+  l0_ao.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_o.f32       字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  l0_up.f32      尺寸不同 new=39813120 old=39665664 (元素 9953280 vs 9916416)
+  ln2_0.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/2654208
+  layer0.f32     字节异      relrms=    0.36803%  maxabs=3.707e-02  位不同=2654176/2654208
+  layer26.f32    字节异      relrms=    9.21926%  maxabs=6.830e+03  位不同=2654206/2654208
+  emb.bin        字节异      relrms=   10.01523%  maxabs=6.606e+00  位不同=2359296/2359296
+  ---- 汇总: 可比文件 12 个, 字节全同 9, 有差 3 ----
+=========== 对拍 3: 512² 参考档(CARDFFN=0) vs 第21轮生产落盘 /tmp/vs23/n512 ===========
+==============================================================================
+512 ref(CARDFFN=0) vs ch21生产落盘   新=/tmp/vs25/n512/ref   参=/tmp/vs23/n512
+  l0_qb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_kb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_vb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_qt0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/73728
+  l0_sm0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1048576
+  l0_sm1.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1048576
+  l0_ao.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_o.f32       字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_up.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/4407296
+  ln2_0.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  layer0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  layer26.f32    字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  emb.bin        字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1048576
+  ---- 汇总: 可比文件 13 个, 字节全同 13, 有差 0 ----
+=========== 对拍 4: 512² 全卡档(CARDFFN=1) vs 512² 参考档 ===========
+==============================================================================
+512 card(CARDFFN=1) vs ref   新=/tmp/vs25/n512/card   参=/tmp/vs25/n512/ref
+  l0_qb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_kb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_vb.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_qt0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/73728
+  l0_sm0.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1048576
+  l0_sm1.f32     字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1048576
+  l0_ao.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_o.f32       字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  l0_up.f32      尺寸不同 new=17694720 old=17629184 (元素 4423680 vs 4407296)
+  ln2_0.f32      字节同      relrms=    0.00000%  maxabs=0.000e+00  位不同=0/1179648
+  layer0.f32     字节异      relrms=    0.36744%  maxabs=3.574e-02  位不同=1179628/1179648
+  layer26.f32    字节异      relrms=    9.90778%  maxabs=6.529e+03  位不同=1179646/1179648
+  emb.bin        字节异      relrms=   18.05773%  maxabs=1.423e+01  位不同=1048575/1048576
+  ---- 汇总: 可比文件 12 个, 字节全同 9, 有差 3 ----
+
+=========== 逐层耗时 (VIS_ONLY=27) ===========
+[vis] 权重点卡完成: chip0 450 MB, chip1 450 MB
+[vis]   层 20  0.463s (gemm 累计 2.24s host 0.24s)
+[vis]   层 21  0.475s (gemm 累计 2.34s host 0.25s)
+[vis]   层 22  0.458s (gemm 累计 2.44s host 0.26s)
+[vis]   层 25  0.459s (gemm 累计 2.75s host 0.29s)
+[vis]   层 26  0.449s (gemm 累计 2.86s host 0.30s)
+[vis] 完成: 576 token, 总耗时 12.79s (gemm 2.94s, host 0.30s)
+[vis] ★ PROF: 块迭代=3016 | H2D 0.434s/5520次 | gemm 0.017s/26182次 | wait 1.593s/1314次 | D2H 0.935s/222次 | 归一(主机) 0.305s | 折回(卡上, 5644次算子) 0.026s | 打包 0.000s
+[vis] ★ PROF2: 主机其它 | attn 8.020s | softmax 2.817s | rope 0.338s | bias/残差 0.000s | gelu 0.107s | post/merger 0.120s
+[vis] 权重点卡完成: chip0 449 MB, chip1 449 MB
+[vis]   层 20  0.601s (gemm 累计 3.86s host 0.47s)
+[vis]   层 21  0.614s (gemm 累计 4.05s host 0.50s)
+[vis]   层 22  0.585s (gemm 累计 4.23s host 0.52s)
+[vis]   层 25  0.554s (gemm 累计 4.78s host 0.59s)
+[vis]   层 26  0.589s (gemm 累计 4.96s host 0.61s)
+[vis] 完成: 576 token, 总耗时 16.22s (gemm 5.04s, host 0.61s)
+[vis] ★ PROF: 块迭代=5446 | H2D 0.738s/5628次 | gemm 0.027s/26182次 | wait 2.376s/1530次 | D2H 1.419s/276次 | 归一(主机) 0.614s | 折回(卡上, 8506次算子) 0.040s | 打包 0.000s
+[vis] ★ PROF2: 主机其它 | attn 8.011s | softmax 2.823s | rope 0.299s | bias/残差 0.000s | gelu 2.694s | post/merger 0.117s
+[vis] 权重点卡完成: chip0 449 MB, chip1 449 MB
+[vis]   层 20  0.632s (gemm 累计 3.96s host 0.56s)
+[vis]   层 21  1.023s (gemm 累计 4.18s host 0.61s)
+[vis]   层 22  0.593s (gemm 累计 4.36s host 0.63s)
+[vis]   层 25  0.561s (gemm 累计 4.92s host 0.70s)
+[vis]   层 26  0.597s (gemm 累计 5.11s host 0.73s)
+[vis] 完成: 576 token, 总耗时 17.49s (gemm 5.19s, host 0.73s)
+[vis] ★ PROF: 块迭代=5446 | H2D 0.748s/5628次 | gemm 0.027s/26182次 | wait 2.377s/1530次 | D2H 1.440s/276次 | 归一(主机) 0.732s | 折回(卡上, 8506次算子) 0.039s | 打包 0.000s
+[vis] ★ PROF2: 主机其它 | attn 8.871s | softmax 2.818s | rope 0.341s | bias/残差 0.000s | gelu 2.855s | post/merger 0.140s
+[vis] 权重点卡完成: chip0 450 MB, chip1 450 MB
+[vis]   层 20  0.458s (gemm 累计 2.30s host 0.29s)
+[vis]   层 21  0.466s (gemm 累计 2.41s host 0.31s)
+[vis]   层 22  0.471s (gemm 累计 2.52s host 0.32s)
+[vis]   层 25  0.473s (gemm 累计 2.84s host 0.36s)
+[vis]   层 26  0.470s (gemm 累计 2.94s host 0.37s)
+[vis] 完成: 576 token, 总耗时 13.53s (gemm 3.02s, host 0.37s)
+[vis] ★ PROF: 块迭代=3016 | H2D 0.446s/5520次 | gemm 0.018s/26182次 | wait 1.596s/1314次 | D2H 0.949s/222次 | 归一(主机) 0.371s | 折回(卡上, 5644次算子) 0.028s | 打包 0.000s
+[vis] ★ PROF2: 主机其它 | attn 8.553s | softmax 2.828s | rope 0.345s | bias/残差 0.000s | gelu 0.104s | post/merger 0.135s
+[vis] 权重点卡完成: chip0 449 MB, chip1 449 MB
+[vis]   层 20  0.260s (gemm 累计 3.29s host 0.61s)
+[vis]   层 21  0.254s (gemm 累计 3.44s host 0.63s)
+[vis]   层 22  0.240s (gemm 累计 3.59s host 0.66s)
+[vis]   层 25  0.252s (gemm 累计 4.07s host 0.75s)
+[vis]   层 26  0.261s (gemm 累计 4.23s host 0.78s)
+[vis] 完成: 256 token, 总耗时 7.37s (gemm 4.27s, host 0.78s)
+[vis] ★ PROF: 块迭代=14950 | H2D 0.882s/7356次 | gemm 0.078s/14950次 | wait 1.509s/2116次 | D2H 1.442s/1950次 | 归一(主机) 0.782s | 折回(卡上, 19182次算子) 0.077s | 打包 0.000s
+[vis] ★ PROF2: 主机其它 | attn 3.681s | softmax 1.009s | rope 0.157s | bias/残差 0.000s | gelu 1.239s | post/merger 0.067s
+[vis] 权重点卡完成: chip0 450 MB, chip1 450 MB
+[vis]   层 20  0.197s (gemm 累计 2.53s host 0.50s)
+[vis]   层 21  0.220s (gemm 累计 2.65s host 0.52s)
+[vis]   层 22  0.208s (gemm 累计 2.77s host 0.55s)
+[vis]   层 25  0.201s (gemm 累计 3.12s host 0.61s)
+[vis]   层 26  0.209s (gemm 累计 3.24s host 0.64s)
+[vis] 完成: 256 token, 总耗时 5.80s (gemm 3.28s, host 0.64s)
+[vis] ★ PROF: 块迭代=12520 | H2D 0.720s/7248次 | gemm 0.070s/14950次 | wait 1.212s/2008次 | D2H 1.254s/1896次 | 归一(主机) 0.639s | 折回(卡上, 16536次算子) 0.070s | 打包 0.000s
+[vis] ★ PROF2: 主机其它 | attn 3.686s | softmax 1.055s | rope 0.159s | bias/残差 0.000s | gelu 0.064s | post/merger 0.061s
+
+--- [8] 安装 orn3.new25 -> orn3 (旧件 orn3.pre25.bak 已在; 再存 orn3.pre25b.bak) ---
+76efaa50c64d8f72948ef7643d2efb94  orn3
+76efaa50c64d8f72948ef7643d2efb94  orn3.new25
+24a925107d44a9b73174147927d93f78  orn3.pre25.bak
+
+=== stage25 结束 2026-09-22 14:58:32 | 异常 = 18 | reset 5/5 ===
+=== stage25 done ===

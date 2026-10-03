@@ -1,0 +1,121 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+
+#define PACKED_PER_HV (2 + KHD + KHD + VHD)  // 386 floats = 1544 bytes
+#define S_PER_HV (RPC * KHD)  // 1024 floats = 4096 bytes
+
+// ==== multi-slot ALL-LAYER delta-net, double-buffered async pipeline ====
+// S     : [M][NL][NVH][VHD][KHD] - fully resident on device
+// packed : [M][NL][NVH][PACKED_PER_HV]
+// outT   : [M][NL][NVH][VHD]
+// Per core (owns hv range hstart..hend): issue async load for hv_{i+1} into
+// spare buffer while computing hv_i. All loads/stores are ASYNC; mfence()
+// waits for the NEXT block's data before computing it, so compute overlaps
+// the previous transfer.
+__global__ void dn_k_ml_pipe(
+    float *S,
+    const float *packed_in,
+    float *outT,
+    int M,
+    int NL
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    int nhv = hend - hstart;
+    if (nhv <= 0) return;
+
+    __local__ float lr[2][RPC][KHD];       // S double buffer (2 hvs)
+    __local__ float packed_l[2][PACKED_PER_HV];
+    __local__ float ob[2][RPC];
+
+    float qscale = 1.0f / sqrt((float)KHD);
+    int r0 = cid * RPC;
+    size_t sl_stride = (size_t)NVH * VHD * KHD;
+
+    for (int l = 0; l < NL; l++) {
+        for (int t = 0; t < M; t++) {
+            __global_ptr__ float *S_t = S + ((size_t)t * NL + (size_t)l) * sl_stride;
+
+            // --- stage 0: async load hv[0] into buffer 0 ---
+            {
+                int hv = hstart;
+                __global_ptr__ float *sp = S_t + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+                GM2LM_ASYNC(sp, lr[0], S_PER_HV * 4);
+                __global_ptr__ const float *src = packed_in
+                    + (((size_t)t * NL + (size_t)l) * NVH + hv) * PACKED_PER_HV;
+                GM2LM_ASYNC(src, packed_l[0], PACKED_PER_HV * 4);
+            }
+            mfence();
+
+            for (int i = 0; i < nhv; i++) {
+                int cur = i & 1;
+                int nxt = (i + 1) & 1;
+
+                // issue next hv load into the OTHER buffer (async, overlaps compute below)
+                if (i + 1 < nhv) {
+                    int hv = hstart + i + 1;
+                    __global_ptr__ float *sp = S_t + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+                    GM2LM_ASYNC(sp, lr[nxt], S_PER_HV * 4);
+                    __global_ptr__ const float *src = packed_in
+                        + (((size_t)t * NL + (size_t)l) * NVH + hv) * PACKED_PER_HV;
+                    GM2LM_ASYNC(src, packed_l[nxt], PACKED_PER_HV * 4);
+                }
+
+                // compute hv_i (buffer 'cur' is ready: loaded and fenced)
+                {
+                    const float *pk = packed_l[cur];
+                    float eg = pk[0];
+                    float bb = pk[1];
+                    const float *kp = pk + 2;
+                    const float *qp = pk + 2 + KHD;
+                    const float *vp = pk + 2 + KHD + KHD;
+                    #pragma unroll
+                    for (int rr = 0; rr < RPC; rr++) {
+                        float sk = 0.f;
+                        #pragma unroll
+                        for (int k = 0; k < KHD; k++) {
+                            float a0 = lr[cur][rr][k] * eg;
+                            lr[cur][rr][k] = a0;
+                            sk += a0 * kp[k];
+                        }
+                        float d = (vp[r0 + rr] - sk) * bb;
+                        float so = 0.f;
+                        #pragma unroll
+                        for (int k = 0; k < KHD; k++) {
+                            float a0 = lr[cur][rr][k] + kp[k] * d;
+                            lr[cur][rr][k] = a0;
+                            so += a0 * qp[k];
+                        }
+                        ob[cur][rr] = so * qscale;
+                    }
+                    int hv = hstart + i;
+                    __global_ptr__ float *sp = S_t + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+                    LM2GM_ASYNC(lr[cur], sp, S_PER_HV * 4);
+                    __global_ptr__ float *ot = outT + (((size_t)t * NL + (size_t)l) * NVH + hv) * VHD + r0;
+                    LM2GM_ASYNC(ob[cur], ot, RPC * 4);
+                }
+
+                // wait for next hv's data (also drains the LM2GM stores of hv_i)
+                mfence();
+            }
+        }
+    }
+}
+
+void run_delta_net_merged_ml_pipe(
+    int clusters, int cores, int M, int NL,
+    float *S, const float *packed_in, float *outT
+) {
+    dn_k_ml_pipe<<<clusters, cores>>>(S, packed_in, outT, M, NL);
+}

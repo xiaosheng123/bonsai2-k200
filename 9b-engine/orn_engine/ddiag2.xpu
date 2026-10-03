@@ -1,0 +1,39 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// Diagnostic v2: only cluster0/core0 reads via GM2LM, writes all to out.
+__global__ void ddiag2_kernel(
+    float *S,
+    const float *k,
+    const float *v,
+    const float *q,
+    const float *g,
+    const float *b,
+    float *out
+) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cl != 0 || cid != 0) return;
+
+    __local__ float l[4];
+    GM2LM(S, l, 16);      // S[0..3]
+    out[0] = l[0]; out[1] = l[1]; out[2] = l[2]; out[3] = l[3];
+    GM2LM(k, l, 16);      // k[0..3]
+    out[4] = l[0]; out[5] = l[1]; out[6] = l[2]; out[7] = l[3];
+    GM2LM(q, l, 16);      // q[0..3]
+    out[8] = l[0]; out[9] = l[1]; out[10] = l[2]; out[11] = l[3];
+    GM2LM(v, l, 16);      // v[0..3]
+    out[12] = l[0]; out[13] = l[1]; out[14] = l[2]; out[15] = l[3];
+    GM2LM(g, l, 4);       // g[0]
+    out[16] = l[0];
+    GM2LM(b, l, 4);       // b[0]
+    out[17] = l[0];
+    out[18] = 123.0f;
+}
+
+void run_ddiag2(int cl, int co,
+    float *S, const float *k, const float *v, const float *q,
+    const float *g, const float *b, float *out) {
+    ddiag2_kernel<<<cl, co>>>(S, k, v, q, g, b, out);
+}

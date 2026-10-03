@@ -1,0 +1,116 @@
+[
+ {
+  "turn": 1,
+  "text": "5",
+  "finish": "stop",
+  "wall": 44.48,
+  "k": {
+   "gen_secs": 10.98,
+   "wall_secs": 44.47,
+   "vision_tokens": [],
+   "image_encode": "[vis] 完成: 576 token, 总耗时 16.11s (gemm 162.01s, host 25.43s)",
+   "tok_per_s": 0.0911,
+   "prompt_chars": 764,
+   "nothink": true,
+   "sid": "2a2e90e1942cf840",
+   "prompt_tokens": 370,
+   "prefill_reused_tokens": 0,
+   "engine_prefill": "[orn] prompt=370 tok 用时 10.75s (29.1 ms/tok, 全量 复用0 tok) | 生成 1 tok 用时 0.07s = 15.136 tok/s | gemv 810016 次"
+  }
+ },
+ {
+  "turn": 2,
+  "text": "5",
+  "finish": "stop",
+  "wall": 7.3,
+  "k": {
+   "gen_secs": 5.96,
+   "wall_secs": 7.29,
+   "vision_tokens": [],
+   "image_encode": "[vis] 完成: 576 token, 总耗时 16.11s (gemm 162.01s, host 25.43s)",
+   "tok_per_s": 0.1679,
+   "prompt_chars": 517,
+   "nothink": true,
+   "sid": "2f68feaf1facaa10",
+   "prompt_tokens": 217,
+   "prefill_reused_tokens": 0,
+   "engine_prefill": "[orn] prompt=217 tok 用时 5.82s (26.8 ms/tok, 全量 复用0 tok) | 生成 1 tok 用时 0.06s = 16.200 tok/s | gemv 812987 次"
+  }
+ },
+ {
+  "turn": 3,
+  "text": "6",
+  "finish": "stop",
+  "wall": 1.16,
+  "k": {
+   "gen_secs": 1.16,
+   "wall_secs": 1.16,
+   "vision_tokens": [],
+   "image_encode": "[vis] 完成: 576 token, 总耗时 16.11s (gemm 162.01s, host 25.43s)",
+   "tok_per_s": 0.8642,
+   "prompt_chars": 623,
+   "nothink": true,
+   "sid": "2f68feaf1facaa10",
+   "prompt_tokens": 252,
+   "prefill_reused_tokens": 218,
+   "engine_prefill": "[orn] prompt=252 tok 用时 1.04s (30.7 ms/tok, 会话 复用218 tok) | 生成 1 tok 用时 0.07s = 15.080 tok/s | gemv 813117 次"
+  }
+ },
+ {
+  "turn": 4,
+  "text": "7",
+  "finish": "stop",
+  "wall": 1.12,
+  "k": {
+   "gen_secs": 1.12,
+   "wall_secs": 1.12,
+   "vision_tokens": [],
+   "image_encode": "[vis] 完成: 576 token, 总耗时 16.11s (gemm 162.01s, host 25.43s)",
+   "tok_per_s": 0.896,
+   "prompt_chars": 729,
+   "nothink": true,
+   "sid": "2f68feaf1facaa10",
+   "prompt_tokens": 287,
+   "prefill_reused_tokens": 253,
+   "engine_prefill": "[orn] prompt=287 tok 用时 1.01s (29.6 ms/tok, 会话 复用253 tok) | 生成 1 tok 用时 0.06s = 17.160 tok/s | gemv 813247 次"
+  }
+ },
+ {
+  "turn": 5,
+  "text": "8",
+  "finish": "stop",
+  "wall": 1.18,
+  "k": {
+   "gen_secs": 1.18,
+   "wall_secs": 1.18,
+   "vision_tokens": [],
+   "image_encode": "[vis] 完成: 576 token, 总耗时 16.11s (gemm 162.01s, host 25.43s)",
+   "tok_per_s": 0.8486,
+   "prompt_chars": 835,
+   "nothink": true,
+   "sid": "2f68feaf1facaa10",
+   "prompt_tokens": 322,
+   "prefill_reused_tokens": 288,
+   "engine_prefill": "[orn] prompt=322 tok 用时 1.07s (31.4 ms/tok, 会话 复用288 tok) | 生成 1 tok 用时 0.06s = 15.967 tok/s | gemv 813377 次"
+  }
+ },
+ {
+  "turn": 6,
+  "text": "9",
+  "finish": "stop",
+  "wall": 1.27,
+  "k": {
+   "gen_secs": 1.26,
+   "wall_secs": 1.26,
+   "vision_tokens": [],
+   "image_encode": "[vis] 完成: 576 token, 总耗时 16.11s (gemm 162.01s, host 25.43s)",
+   "tok_per_s": 0.791,
+   "prompt_chars": 941,
+   "nothink": true,
+   "sid": "2f68feaf1facaa10",
+   "prompt_tokens": 357,
+   "prefill_reused_tokens": 323,
+   "engine_prefill": "[orn] prompt=357 tok 用时 1.14s (33.4 ms/tok, 会话 复用323 tok) | 生成 1 tok 用时 0.08s = 13.174 tok/s | gemv 813507 次"
+  }
+ }
+]

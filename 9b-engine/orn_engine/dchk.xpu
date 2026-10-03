@@ -1,0 +1,11 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+__global__ void dchk_k(const float *S, float *out) {
+    int row = cluster_id() * core_num() + core_id();
+    if (row >= 128) return;
+    __local__ float r[128];
+    GM2LM(S + (size_t)row * 128, r, 512);
+    LM2GM(r, out + (size_t)row * 128, 512);
+}
+void run_dchk(const float *S, float *out) { dchk_k<<<8, 16>>>(S, out); }

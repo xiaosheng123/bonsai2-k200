@@ -1,0 +1,98 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+
+#define PACKED_PER_HV (2 + KHD + KHD + VHD)  // 386 floats = 1544 bytes
+#define S_PER_HV (RPC * KHD)  // 1024 floats = 4096 bytes
+
+// ==== multi-slot batched delta-net: M slots, each with INDEPENDENT S ====
+// S        : [M][NVH][VHD][KHD] - per-slot persistent state (current layer)
+// packed_in: [M][NVH][PACKED_PER_HV] - host packs g,b,k,q,v per slot per hv
+// outT     : [M][NVH][VHD]
+// Unlike dn_k_T_merged (shared S, sequential recurrence across T),
+// here each t is a different slot with its own S -> load once, compute, store back.
+__global__ void dn_k_T_merged_multi(
+    float *S,
+    const float *packed_in,
+    float *outT,
+    int M
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;
+
+    __local__ float kl[KHD];
+    __local__ float ql[KHD];
+    __local__ float vl[VHD];
+    __local__ float lr[RPC][KHD];
+    __local__ float ob[RPC];
+    __local__ float packed_l[PACKED_PER_HV];
+
+    float qscale = 1.0f / sqrt((float)KHD);
+    int r0 = cid * RPC;
+
+    for (int t = 0; t < M; t++) {
+        __global_ptr__ float *S_t = S + (size_t)t * NVH * VHD * KHD;
+        for (int hv = hstart; hv < hend; hv++) {
+            int hk = hv % 16;
+            __global_ptr__ float *sp = S_t + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+            // Load this slot's S for this hv
+            GM2LM(sp, lr, S_PER_HV * 4);
+
+            __global_ptr__ const float *src = packed_in + (size_t)t * NVH * PACKED_PER_HV + (size_t)hv * PACKED_PER_HV;
+            GM2LM(src, packed_l, PACKED_PER_HV * 4);
+
+            float eg = packed_l[0];
+            float bb = packed_l[1];
+            float *kp = packed_l + 2;
+            float *qp = packed_l + 2 + KHD;
+            float *vp = packed_l + 2 + KHD + KHD;
+
+            for (int i = 0; i < KHD; i++) { kl[i] = kp[i]; }
+            for (int i = 0; i < KHD; i++) { ql[i] = qp[i]; }
+            for (int i = 0; i < VHD; i++) { vl[i] = vp[i]; }
+
+            for (int rr = 0; rr < RPC; rr++) {
+                int row = r0 + rr;
+                // 段1: a0 = r*eg (写回), sk += a0*k, i 升序单累加器 (位级同 CPU)
+                float sk = 0.f;
+                for (int i = 0; i < KHD; i++) {
+                    float a0 = lr[rr][i] * eg;
+                    lr[rr][i] = a0;
+                    sk += a0 * kl[i];
+                }
+                float d = (vl[row] - sk) * bb;
+                // 段2: u = r + k*d (写回), so += u*q
+                float so = 0.f;
+                for (int i = 0; i < KHD; i++) {
+                    float a0 = lr[rr][i] + kl[i] * d;
+                    lr[rr][i] = a0;
+                    so += a0 * ql[i];
+                }
+                ob[rr] = so * qscale;
+            }
+            // Store this slot's S back (updated in-place, same S block)
+            LM2GM(lr, sp, S_PER_HV * 4);
+            // Store output
+            __global_ptr__ float *ot = outT + ((size_t)t * NVH + hv) * VHD + r0;
+            LM2GM(ob, ot, RPC * 4);
+        }
+    }
+}
+
+void run_delta_net_batch_merged_multi(
+    int clusters, int cores, int M,
+    float *S, const float *packed_in, float *outT
+) {
+    dn_k_T_merged_multi<<<clusters, cores>>>(S, packed_in, outT, M);
+}

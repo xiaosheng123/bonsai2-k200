@@ -1,0 +1,32 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// (cluster,core) 生效映射: 每个线程给自己那一格写 1
+__global__ void pmap_k(int *o) {
+    int c = cluster_id(), k = core_id();
+    if (c < 16 && k < 128) o[c * 128 + k] = 1;
+}
+void pmap(int *o, int cl, int co) { pmap_k<<<cl, co>>>(o); }
+
+// 连续两次 launch 都要落盘 (验证多 launch)
+__global__ void pw4_k(int *o, int v) {
+    int tid = cluster_id() * core_num() + core_id();
+    if (tid < 4096) o[tid] = v;
+}
+void pw4(int *o, int v, int cl, int co) { pw4_k<<<cl, co>>>(o, v); }
+
+// 纯读带宽: 每个核用 GM2LM 搬 slab 到 local, 累加首字节防优化; 用 8 个 slab 双缓冲
+__global__ void rd_k(const unsigned char *W, int slab, int nslab, float *out) {
+    int tid = cluster_id() * core_num() + core_id();
+    int nthr = cluster_num() * core_num();
+    __local__ unsigned char buf[2][16384];
+    int acc = 0, cur = 0;
+    for (int s = tid; s < nslab; s += nthr) {
+        GM2LM(W + (size_t)s * slab, buf[cur], slab);
+        acc += buf[cur][0] + buf[cur][slab - 1];
+        cur ^= 1;
+    }
+    out[tid] = (float)acc;
+}
+void rd(const void *W, int slab, int nslab, void *out, int cl, int co) { rd_k<<<cl, co>>>((const unsigned char *)W, slab, nslab, (float *)out); }

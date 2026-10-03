@@ -1,0 +1,14 @@
+// lmp.xpu — LM (每核局部存储) 容量探针: 只做"声明一个 LBUF 的 __local__ 数组并写满"
+//   不读 global、不写 global (只把 1 个 int 用 LM2GM 写回), 越界时固件报 WR_OVER_LM (可检测、不扩散)。
+//   必须用和真内核一样的 launch 形态 <<<1,16>>> (一个簇 16 核), 因为 LM 需求是按簇算的。
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+
+__global__ void lmp_k(float *o) {
+    __local__ unsigned char buf[LBUF];
+    for (int i = 0; i < LBUF; i += 8) buf[i] = (unsigned char)(i * 7 + 1);
+    __local__ int l[1];
+    l[0] = (int)buf[0] + (int)buf[LBUF - 8];
+    LM2GM(l, o, 4);
+}
+void lmp_run(float *o, int cl, int co) { lmp_k<<<cl, co>>>(o); }

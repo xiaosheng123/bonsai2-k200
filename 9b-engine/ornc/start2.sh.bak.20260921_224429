@@ -1,0 +1,20 @@
+#!/bin/bash
+# start2.sh — 起 8090 单端口服务 (v2 引擎: 双芯行分裂 + 同 x 矩阵拼接 + KV/状态复用)
+cd /home/caden/ornc || exit 1
+export K200_ENGINE=/home/caden/orn_engine/orn3
+export K200_MODEL_PATH=/home/caden/orn/Ornith-1.5-9B-Q8_0.gguf
+export K200_PORT=8090
+export K200_NGEN=64
+export K200_MODEL=ornith-1.5-9b-k200
+export K200_SAFEMAXSEC=28800
+export K200_RAWTOK=1
+/usr/bin/setsid /usr/bin/nohup python3 /home/caden/ornc/serve2.py >> /home/caden/ornc/serve2.log 2>&1 < /dev/null &
+echo "server pid=$!"
+for i in $(seq 1 60); do
+  sleep 2
+  if timeout 5 curl -s http://127.0.0.1:8090/health 2>/dev/null | grep -q '"ready": true'; then
+    echo "READY after ${i}x2s"; exit 0
+  fi
+done
+echo "NOT READY in 120s"; timeout 5 curl -s http://127.0.0.1:8090/health; echo
+exit 1

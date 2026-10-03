@@ -1,0 +1,102 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// ==== multi-slot ALL-LAYER delta-net, core-blocked layout, 4KB-safe GM2LM ====
+// 布局让每核的每个 hv 的 S 连续 (4KB), 每次 GM2LM 搬 4KB (<= 硬件单次上限).
+// 每核负责该 cl 分到的 HV_PER_CL=4 个 hv 的固定 RPC=8 行.
+//
+// S     布局 [M][NL][CL=8][CID=16][HV_LOCAL=4][RPC=8][KHD]
+//   - 每核 (cl,cid) 处理 4 个 hv, 每个 hv 的 8 行连续 4KB
+// packed 布局 [M][NL][CL][CID][HV_LOCAL][PPH]  (每 hv 1.5KB)
+// outT   布局 [M][NL][CL][CID][HV_LOCAL][RPC]
+//
+// 每层每核: 4 次 GM2LM(4KB S) + 4 次 GM2LM(1.5KB packed) + 计算 + 4 次 LM2GM
+//   vs 原 multi kernel 每核 32 hv 串行 -> 固定延迟摊薄 8x
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+#define HV_PER_CL (NVH / 8)     // 4
+#define PACKED_PER_HV (2 + KHD + KHD + VHD)  // 386
+
+#define CORE_S  (HV_PER_CL * RPC * KHD)          // 4096 floats = 16KB (每核全部)
+#define CORE_P  (HV_PER_CL * PACKED_PER_HV)      // 1544 floats
+#define CORE_O  (HV_PER_CL * RPC)                // 32 floats
+
+#define S_PER_HV (RPC * KHD)                     // 1024 floats = 4KB (安全单次)
+
+__global__ void dn_k_ml_core_safe(
+    float *S,
+    const float *packed_in,
+    float *outT,
+    int M,
+    int NL
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    if (ncl != 8) return;   // 固定 8 cluster
+
+    __local__ float lr[RPC][KHD];        // 4KB
+    __local__ float pl[PACKED_PER_HV];   // 1.5KB
+    __local__ float ob[RPC];
+
+    float qscale = 1.0f / sqrt((float)KHD);
+    size_t slot_stride = (size_t)ncl * NC * CORE_S;
+    size_t pack_stride = (size_t)ncl * NC * CORE_P;
+    size_t out_stride  = (size_t)ncl * NC * CORE_O;
+    size_t core_off = ((size_t)cl * NC + cid) * CORE_S;
+
+    for (int l = 0; l < NL; l++) {
+        for (int t = 0; t < M; t++) {
+            __global_ptr__ float *S_t = S + ((size_t)t * NL + (size_t)l) * slot_stride + core_off;
+            __global_ptr__ const float *P_t = packed_in + ((size_t)t * NL + (size_t)l) * pack_stride
+                + ((size_t)cl * NC + cid) * CORE_P;
+            __global_ptr__ float *O_t = outT + ((size_t)t * NL + (size_t)l) * out_stride
+                + ((size_t)cl * NC + cid) * CORE_O;
+
+            for (int hv = 0; hv < HV_PER_CL; hv++) {
+                // 该核该 hv 的 S: 连续 4KB
+                __global_ptr__ float *S_hv = S_t + (size_t)hv * S_PER_HV;
+                GM2LM(S_hv, lr, S_PER_HV * 4);
+
+                __global_ptr__ const float *P_hv = P_t + (size_t)hv * PACKED_PER_HV;
+                GM2LM(P_hv, pl, PACKED_PER_HV * 4);
+
+                const float *pk = pl;
+                float eg = pk[0], bb = pk[1];
+                const float *kp = pk + 2, *qp = pk + 2 + KHD, *vp = pk + 2 + KHD + KHD;
+                for (int rr = 0; rr < RPC; rr++) {
+                    float sk = 0.f;
+                    for (int i = 0; i < KHD; i++) {
+                        float a0 = lr[rr][i] * eg;
+                        lr[rr][i] = a0;
+                        sk += a0 * kp[i];
+                    }
+                    float d = (vp[cid * RPC + rr] - sk) * bb;
+                    float so = 0.f;
+                    for (int i = 0; i < KHD; i++) {
+                        float a0 = lr[rr][i] + kp[i] * d;
+                        lr[rr][i] = a0;
+                        so += a0 * qp[i];
+                    }
+                    ob[rr] = so * qscale;
+                }
+                LM2GM(lr, S_hv, S_PER_HV * 4);
+                __global_ptr__ float *O_hv = O_t + (size_t)hv * RPC;
+                LM2GM(ob, O_hv, RPC * 4);
+            }
+        }
+    }
+}
+
+void run_delta_net_merged_ml_core_safe(
+    int clusters, int cores, int M, int NL,
+    float *S, const float *packed_in, float *outT
+) {
+    dn_k_ml_core_safe<<<clusters, cores>>>(S, packed_in, outT, M, NL);
+}

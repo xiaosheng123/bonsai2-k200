@@ -1,0 +1,45 @@
+// rdinfo.xpu — 只读微基准 (严格模仿已验证的 kq8.xpu 手法: 纯指针 + GM2LM/LM2GM, 不直接写 global)
+//   1) info2_k : 把 (cluster_id, core_id, cluster_num, core_num) 写回, 摸清真实拓扑
+//   2) rd2_k   : 纯 GM2LM 读, 参数 (每线程 span, chunk, nch) => 真实读带宽 vs 块大小/线程数
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define HW_CORE 16
+#define RDI_TID (cluster_id() * HW_CORE + (core_id() & (HW_CORE - 1)))
+#define RDI_NT  (cluster_num() * HW_CORE)
+
+// 输出数组: out[ tid*4 + 0..3 ] = cid, core, cn, cnum
+__global__ void info2_k(int *out) {
+    __local__ int l[4];
+    int tid = RDI_TID;
+    l[0] = cluster_id();
+    l[1] = core_id();
+    l[2] = cluster_num();
+    l[3] = core_num();
+    LM2GM(l, out + tid * 4, 16);
+}
+void rdinfo_info(int *out, int cl, int co) { info2_k<<<cl, co>>>(out); }
+
+// 纯读: 每线程从 W + tid*span 起读 nch 个 chunk (每个 chunk 字节)
+__global__ void rd2_k(const unsigned char *W, long long span, long long total, int chunk, int nch, int *out) {
+    __local__ unsigned char buf[32768];
+    __local__ int lo[1];
+    int tid = RDI_TID;
+    long long base = (long long)tid * span;
+    // ★ 完整边界检查: 整段必须落在 [0, total) 内, 且 chunk*nch <= span <= 缓冲
+    if (chunk <= 0 || nch < 0 || chunk > 32768 || (long long)chunk * nch > span) { lo[0] = -1; LM2GM(lo, out + tid, 4); return; }
+    if (base + span > total) { lo[0] = -2; LM2GM(lo, out + tid, 4); return; }
+    _global_ptr_ const unsigned char *p = W + base;
+    int s = 0;
+    for (int c = 0; c < nch; c++) {
+        GM2LM(p, buf, chunk);
+        s += (int)buf[0] + (int)buf[chunk - 1];
+        p += chunk;
+    }
+    lo[0] = s;
+    LM2GM(lo, out + tid, 4);
+}
+void rdinfo_rd(const void *W, long long span, long long total, int chunk, int nch, int *out, int cl, int co) {
+    rd2_k<<<cl, co>>>((const unsigned char *)W, span, total, chunk, nch, out);
+}

@@ -1,0 +1,30 @@
+// sync_kern2.xpu — 纯 device: 同步 GM2LM 4KB/16KB, 显式 __global_ptr__
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// mode 0: 4KB 同步, mode 1: 16KB 同步
+__global__ void sync_verify2(float *src, float *dst, int mode) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    int tid = cl * 16 + cid;
+    __local__ float buf[8192];   // 32KB
+    __global_ptr__ float *sp = src + (size_t)tid * 8192;
+    float s = 0;
+    if (mode == 0) {
+        for (int b = 0; b < 4; b++) {
+            GM2LM(sp + (size_t)b * 1024, buf + b * 1024, 4096);  // 4 x 4KB
+        }
+        for (int i = 0; i < 4096; i++) s += buf[i] * 1.0001f;
+    } else {
+        GM2LM(sp, buf, 16384);   // 1 x 16KB
+        for (int i = 0; i < 4096; i++) s += buf[i] * 1.0001f;
+    }
+    __global_ptr__ float *dp = dst + tid;
+    LM2GM(&s, dp, 4);
+}
+
+void run_sync_verify2(int clusters, int cores, int mode, float *src, float *dst) {
+    sync_verify2<<<clusters, cores>>>(src, dst, mode);
+}

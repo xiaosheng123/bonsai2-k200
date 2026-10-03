@@ -1,0 +1,38 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// 空转基线: 与 gm_copy 同构的纯算循环 (防 DCE)
+__global__ void gm_empty(long *sink, int N)
+{
+    volatile float acc = 0;
+    for (int i = 0; i < N; i++) acc += 1.0f;
+    if (core_id() == 0 && cluster_id() == 0) *sink = (long)acc;
+}
+
+// N 次 GM2LM(src -> local), sz = 字节数
+__global__ void gm_copy(float *src, long *sink, int sz, int N)
+{
+    __local__ float buf[1024];          // 4KB
+    for (int i = 0; i < N; i++) {
+        GM2LM(src, buf, sz);
+    }
+    if (core_id() == 0 && cluster_id() == 0) *sink = 1;
+}
+
+// N 次 LM2GM(local -> dst)
+__global__ void gm_store(float *dst, long *sink, int sz, int N)
+{
+    __local__ float buf[1024];
+    for (int i = 0; i < 1024; i++) buf[i] = 1.0f;
+    float acc = 0;
+    for (int i = 0; i < N; i++) {
+        LM2GM(buf, dst, sz);
+        acc += buf[(i & 1023)];
+    }
+    if (core_id() == 0 && cluster_id() == 0) *sink = (long)acc;
+}
+
+void run_gm_empty(long *sink, int cl, int co, int N)   { gm_empty<<<cl, co>>>(sink, N); }
+void run_gm_copy(float *src, long *sink, int cl, int co, int sz, int N) { gm_copy<<<cl, co>>>(src, sink, sz, N); }
+void run_gm_store(float *dst, long *sink, int cl, int co, int sz, int N) { gm_store<<<cl, co>>>(dst, sink, sz, N); }

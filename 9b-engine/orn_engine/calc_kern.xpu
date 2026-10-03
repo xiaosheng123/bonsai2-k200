@@ -1,0 +1,89 @@
+// calc_bench.xpu — K200 计算峰值: 标量 vs SIMD 递推核心
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+#include "xpu/kernel/simd.h"
+
+// 模拟 delta-net 核心: 128 行 x 128 列, 2 段, 4 行并行 (与 CPU 递推同构)
+// loops 次重复, 数据全在 local
+__global__ void calc_scalar(float *dst, int loops) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    __local__ float r[4][128];
+    __local__ float kk[128], qq[128], vv[128];
+    float eg = 1.0001f, bb = 0.9999f;
+    int r0 = cid * 8;   // 8 行/核 (128 行 / 16 核)
+    for (int i = 0; i < 128; i++) { kk[i] = 1.0f + i*0.001f; qq[i] = 1.0f - i*0.001f; vv[i] = 0.5f + i*0.0001f; }
+    for (int j = 0; j < 4; j++) for (int i = 0; i < 128; i++) r[j][i] = 0.25f + i*0.01f;
+    float acc = 0;
+    for (int it = 0; it < loops; it++) {
+        // 4 行并行, 每行 128 列, 2 段 (与 forward_multi 递推同构)
+        float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 128; i++) {
+            float ki = kk[i];
+            float a0 = r[0][i] * eg; r[0][i] = a0; s0 += a0 * ki;
+            float a1 = r[1][i] * eg; r[1][i] = a1; s1 += a1 * ki;
+            float a2 = r[2][i] * eg; r[2][i] = a2; s2 += a2 * ki;
+            float a3 = r[3][i] * eg; r[3][i] = a3; s3 += a3 * ki;
+        }
+        float d0 = (vv[0] - s0) * bb, d1 = (vv[1] - s1) * bb, d2 = (vv[2] - s2) * bb, d3 = (vv[3] - s3) * bb;
+        float o0 = 0, o1 = 0, o2 = 0, o3 = 0;
+        for (int i = 0; i < 128; i++) {
+            float ki = kk[i], qi = qq[i];
+            float a0 = r[0][i] + ki * d0; r[0][i] = a0; o0 += a0 * qi;
+            float a1 = r[1][i] + ki * d1; r[1][i] = a1; o1 += a1 * qi;
+            float a2 = r[2][i] + ki * d2; r[2][i] = a2; o2 += a2 * qi;
+            float a3 = r[3][i] + ki * d3; r[3][i] = a3; o3 += a3 * qi;
+        }
+        acc += o0 + o1 + o2 + o3;
+    }
+    LM2GM(&acc, dst + cl * 16 + cid, 4);
+}
+
+__global__ void calc_simd(float *dst, int loops) {
+    int cl = cluster_id();
+    int cid = core_id();
+    if (cid >= 16) return;
+    typedef __attribute__((ext_vector_type(8))) float fv8;
+    __local__ fv8 r[4][16];
+    __local__ fv8 kk[16], qq[16], vv[16];
+    fv8 egv = {1.0001f,1.0001f,1.0001f,1.0001f,1.0001f,1.0001f,1.0001f,1.0001f};
+    fv8 bbv = {0.9999f,0.9999f,0.9999f,0.9999f,0.9999f,0.9999f,0.9999f,0.9999f};
+    for (int i = 0; i < 16; i++) { kk[i] = (fv8){1.0f + i*0.008f, 0,0,0,0,0,0,0}; qq[i] = (fv8){1.0f - i*0.008f, 0,0,0,0,0,0,0}; vv[i] = (fv8){0.5f + i*0.0008f, 0,0,0,0,0,0,0}; }
+    for (int j = 0; j < 4; j++) for (int i = 0; i < 16; i++) r[j][i] = (fv8){0.25f + i*0.08f, 0,0,0,0,0,0,0};
+    float acc = 0;
+    for (int it = 0; it < loops; it++) {
+        fv8 s0 = {0,0,0,0,0,0,0,0}, s1 = {0,0,0,0,0,0,0,0}, s2 = {0,0,0,0,0,0,0,0}, s3 = {0,0,0,0,0,0,0,0};
+        for (int i = 0; i < 16; i++) {
+            fv8 ki = kk[i];
+            fv8 a0 = r[0][i] * egv; r[0][i] = a0; s0 += a0 * ki;
+            fv8 a1 = r[1][i] * egv; r[1][i] = a1; s1 += a1 * ki;
+            fv8 a2 = r[2][i] * egv; r[2][i] = a2; s2 += a2 * ki;
+            fv8 a3 = r[3][i] * egv; r[3][i] = a3; s3 += a3 * ki;
+        }
+        float s0h = s0[0]+s0[1]+s0[2]+s0[3]+s0[4]+s0[5]+s0[6]+s0[7];
+        float s1h = s1[0]+s1[1]+s1[2]+s1[3]+s1[4]+s1[5]+s1[6]+s1[7];
+        float s2h = s2[0]+s2[1]+s2[2]+s2[3]+s2[4]+s2[5]+s2[6]+s2[7];
+        float s3h = s3[0]+s3[1]+s3[2]+s3[3]+s3[4]+s3[5]+s3[6]+s3[7];
+        fv8 dv0 = (vv[0] - (fv8){s0h,s0h,s0h,s0h,s0h,s0h,s0h,s0h}) * bbv;
+        fv8 dv1 = (vv[1] - (fv8){s1h,s1h,s1h,s1h,s1h,s1h,s1h,s1h}) * bbv;
+        fv8 dv2 = (vv[2] - (fv8){s2h,s2h,s2h,s2h,s2h,s2h,s2h,s2h}) * bbv;
+        fv8 dv3 = (vv[3] - (fv8){s3h,s3h,s3h,s3h,s3h,s3h,s3h,s3h}) * bbv;
+        fv8 o0 = {0,0,0,0,0,0,0,0}, o1 = {0,0,0,0,0,0,0,0}, o2 = {0,0,0,0,0,0,0,0}, o3 = {0,0,0,0,0,0,0,0};
+        for (int i = 0; i < 16; i++) {
+            fv8 ki = kk[i], qi = qq[i];
+            fv8 a0 = r[0][i] + ki * dv0; r[0][i] = a0; o0 += a0 * qi;
+            fv8 a1 = r[1][i] + ki * dv1; r[1][i] = a1; o1 += a1 * qi;
+            fv8 a2 = r[2][i] + ki * dv2; r[2][i] = a2; o2 += a2 * qi;
+            fv8 a3 = r[3][i] + ki * dv3; r[3][i] = a3; o3 += a3 * qi;
+        }
+        acc += o0[0]+o1[0]+o2[0]+o3[0];
+    }
+    LM2GM(&acc, dst + cl * 16 + cid, 4);
+}
+
+void run_calc_bench(int clusters, int cores, int loops, float *dst, int mode) {
+    if (mode == 0) calc_scalar<<<clusters, cores>>>(dst, loops);
+    else calc_simd<<<clusters, cores>>>(dst, loops);
+}

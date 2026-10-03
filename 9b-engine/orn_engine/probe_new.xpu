@@ -1,0 +1,23 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+// 写能力探针 (设备侧)
+__global__ void pw_k(int *o, int n) {
+    int tid = cluster_id() * core_num() + core_id();
+    if (tid < n) o[tid] = tid;
+}
+void pw(int *o, int n) { pw_k<<<8, 128>>>(o, n); }
+
+__global__ void pw2_k(int *o, int n, int stride, int cnt) {
+    int tid = cluster_id() * core_num() + core_id();
+    for (int k = 0; k < cnt; k++) { int m = tid + k * stride; if (m < n) o[m] = tid; }
+}
+void pw2(int *o, int n, int stride, int cnt) { pw2_k<<<8, 128>>>(o, n, stride, cnt); }
+
+// 通用: 用给定 grid 把 1..n 写进 o (写自己 tid 的槽)
+__global__ void pw3_k(int *o, int n) {
+    int tid = cluster_id() * core_num() + core_id();
+    if (tid < n) o[tid] = tid;
+}
+void pw3(int *o, int n, int cl, int co) { pw3_k<<<cl, co>>>(o, n); }

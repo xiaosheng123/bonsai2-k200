@@ -1,0 +1,117 @@
+#include <xpu/runtime.h>
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/math.h"
+
+#define VHD 128
+#define KHD 128
+#define NVH 32
+#define NC 16
+#define RPC 8
+
+// Vectorized: KHD=128 divisible by 4
+#define PACKED_PER_HV (2 + KHD + KHD + VHD)  // 386 floats = 1544 bytes
+#define S_PER_HV (RPC * KHD)  // 1024 floats = 4096 bytes
+#define VEC_SIZE 4
+#define KHD_VEC (KHD / VEC_SIZE)  // 32
+
+// Vectorized dot product intrinsic
+__device__ inline float dot4(const float *a, const float *b, int i) {
+    return a[i*4+0]*b[i*4+0] + a[i*4+1]*b[i*4+1] + a[i*4+2]*b[i*4+2] + a[i*4+3]*b[i*4+3];
+}
+
+__global__ void dn_k_T_merged_vec(
+    float *S,
+    const float *packed_in,
+    float *outT,
+    int T
+) {
+    int cl = cluster_id();
+    int ncl = cluster_num();
+    int cid = core_id();
+    if (cid >= NC) return;
+    int hstart = (int)((long long)cl * NVH / ncl);
+    int hend = (int)((long long)(cl + 1) * NVH / ncl);
+    if (hstart >= NVH) return;
+
+    // Local buffers
+    __local__ float kl[KHD];
+    __local__ float ql[KHD];
+    __local__ float vl[VHD];
+    __local__ float lr[RPC][KHD];
+    __local__ float ob[RPC];
+    __local__ float packed_l[PACKED_PER_HV];
+
+    float qscale = 1.0f / sqrt((float)KHD);
+    int r0 = cid * RPC;
+
+    for (int hv = hstart; hv < hend; hv++) {
+        int hk = hv % 16;
+        __global_ptr__ float *sp = S + (size_t)hv * VHD * KHD + (size_t)r0 * KHD;
+        
+        // Load S for this hv
+        GM2LM(sp, lr, S_PER_HV * 4);
+
+        for (int t = 0; t < T; t++) {
+            // Single merged load
+            __global_ptr__ const float *src = packed_in + (size_t)t * NVH * PACKED_PER_HV + (size_t)hv * PACKED_PER_HV;
+            GM2LM(src, packed_l, PACKED_PER_HV * 4);
+
+            float eg = packed_l[0];
+            float bb = packed_l[1];
+            float *kp = packed_l + 2;
+            float *qp = packed_l + 2 + KHD;
+            float *vp = packed_l + 2 + KHD + KHD;
+
+            // Vectorized copy
+            for (int i = 0; i < KHD_VEC; i++) {
+                int idx = i * 4;
+                kl[idx+0] = kp[idx+0]; kl[idx+1] = kp[idx+1]; kl[idx+2] = kp[idx+2]; kl[idx+3] = kp[idx+3];
+                ql[idx+0] = qp[idx+0]; ql[idx+1] = qp[idx+1]; ql[idx+2] = qp[idx+2]; ql[idx+3] = qp[idx+3];
+            }
+            for (int i = 0; i < VHD; i++) vl[i] = vp[i];
+
+            for (int rr = 0; rr < RPC; rr++) {
+                // Vectorized sk accumulation
+                float sk = 0.f;
+                for (int i = 0; i < KHD_VEC; i++) {
+                    int idx = i * 4;
+                    float a0_0 = lr[rr][idx+0] * eg;
+                    float a0_1 = lr[rr][idx+1] * eg;
+                    float a0_2 = lr[rr][idx+2] * eg;
+                    float a0_3 = lr[rr][idx+3] * eg;
+                    lr[rr][idx+0] = a0_0;
+                    lr[rr][idx+1] = a0_1;
+                    lr[rr][idx+2] = a0_2;
+                    lr[rr][idx+3] = a0_3;
+                    sk += a0_0 * kl[idx+0] + a0_1 * kl[idx+1] + a0_2 * kl[idx+2] + a0_3 * kl[idx+3];
+                }
+                float d = (vl[rr] - sk) * bb;
+
+                // Vectorized so accumulation
+                float so = 0.f;
+                for (int i = 0; i < KHD_VEC; i++) {
+                    int idx = i * 4;
+                    float a0_0 = lr[rr][idx+0] + kl[idx+0] * d;
+                    float a0_1 = lr[rr][idx+1] + kl[idx+1] * d;
+                    float a0_2 = lr[rr][idx+2] + kl[idx+2] * d;
+                    float a0_3 = lr[rr][idx+3] + kl[idx+3] * d;
+                    lr[rr][idx+0] = a0_0;
+                    lr[rr][idx+1] = a0_1;
+                    lr[rr][idx+2] = a0_2;
+                    lr[rr][idx+3] = a0_3;
+                    so += a0_0 * ql[idx+0] + a0_1 * ql[idx+1] + a0_2 * ql[idx+2] + a0_3 * ql[idx+3];
+                }
+                ob[rr] = so * qscale;
+            }
+            // Store output
+            __global_ptr__ float *ot = outT + ((size_t)t * NVH + hv) * VHD + r0;
+            LM2GM(ob, ot, RPC * 4);
+        }
+        // Store S for this hv
+        LM2GM(lr, sp, S_PER_HV * 4);
+    }
+}
+
+void run_delta_net_batch_merged_vec(int clusters, int cores, int T, float *S, const float *packed_in, float *outT) {
+    dn_k_T_merged_vec<<<clusters, cores>>>(S, packed_in, outT, T);
+}

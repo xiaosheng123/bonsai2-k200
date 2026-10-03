@@ -1,0 +1,214 @@
+--- orn3.det26.cpp	2026-09-22 17:27:28.257660573 +0000
++++ orn3.p27.cpp	2026-09-22 23:59:11.114571491 +0000
+@@ -1690,6 +1690,97 @@
+         return b;
+     };
+ 
++    // ========================================================================
++    // ★★ 第27轮: 前缀 KV 复用 —— "LCP 命中 + 状态回滚" 检查点表 ★★
++    //   问题: DSH 等客户端每轮把整段上下文重发 ⇒ 若只认"全等"就每轮从头预填充
++    //         (实测 603 tok = 16.8s)。本轮改成: 只要本轮 prompt 的某段前缀已经算过,
++    //         就把状态回滚到那个位置, 只预填充新增 token。
++    //   一个检查点 = (token 序列, 该序列末尾的完整状态):
++    //         conv/S (delta-net) + 每注意层 Kc/Vc 前 pos 行 + logits + g_img_used + 图像依赖
++    //   打点位置 (三个都打, 覆盖不同"重发形态"):
++    //         ① 每条消息边界 (下一个 token 是 <|im_start|>) —— _TRIM 裁点移动后仍能回滚
++    //         ② 预填充末尾 (整段 prompt) —— 同一 prompt 重发 ⇒ 0 预填充
++    //         ③ 生成末尾 (prompt+回答) —— 下一轮"整段重发 + 追加" ⇒ 只算新增的那段
++    //   命中规则 (保守, 与 DETVIS 图像指纹同源):
++    //         检查点的 token 序列必须是本次 prompt 的【前缀】(逐 token 相同);
++    //         且若该前缀里含 <|image_pad|> ⇒ 图像指纹必须与本次相同 (前缀纯文本 ⇒ 与图无关)。
++    //   位级等价: 回滚只是把"同一段 token 算出来的状态"搬回原位, 不改任何数值路径;
++    //         后续 token 仍走同一条 forward/forward_batch 代码 (批大小可能不同, 由
++    //         第13/21章的批量等价性覆盖) ⇒ 输出 token 逐字节可对拍。
++    // ========================================================================
++    struct Ckpt {
++        bool valid = false;
++        std::vector<int> ids;     // 该状态覆盖的 token 序列 (prompt+generated 的前缀)
++        int pos = 0;              // = ids.size() (即下一个 token 的位置索引)
++        uint64_t imgdep = 0;      // 前缀含 image_pad 时的图像指纹; 0 = 前缀与图像无关
++        int img_used = 0;         // 该状态下 g_img_used 的取值
++        uint64_t last = 0;        // LRU 时间戳
++        std::vector<float> conv, S, logits;
++        std::vector<std::vector<float> > Kc, Vc;
++    };
++    static std::vector<Ckpt> g_ck;
++    static uint64_t g_ck_tick = 0;
++    static bool g_ck_inited = false;
++    if (!g_ck_inited) {
++        g_ck_inited = true;
++        const char *e = getenv("K200_CKPT");
++        int n = e ? atoi(e) : 8;
++        if (n < 0) n = 0; if (n > 24) n = 24;
++        g_ck.resize(n);
++        printf("[orn] ★ 前缀 KV 复用(第27轮): 检查点表 %d 槽 (K200_CKPT 可调, 0=关闭); 打点 = 消息边界 + 预填充末尾 + 生成末尾\n", n);
++    }
++    auto ck_mb = [&]() {
++        double b = 0;
++        for (size_t i = 0; i < g_ck.size(); i++) if (g_ck[i].valid) {
++            b += (double)(g_ck[i].conv.size() + g_ck[i].S.size() + g_ck[i].logits.size()) * 4;
++            for (int l = 0; l < NLAYER; l++) if (!g_lay[l].recr) b += (double)(g_ck[i].Kc[l].size() + g_ck[i].Vc[l].size()) * 4;
++        }
++        return b / 1048576.0;
++    };
++    auto ck_nvalid = [&]() { int n = 0; for (size_t i = 0; i < g_ck.size(); i++) if (g_ck[i].valid) n++; return n; };
++    // 打一个检查点 (sids[0..spos) == 已算过的 token 序列; 状态 = 当前 g_st/g_lay)
++    auto ck_take = [&](const std::vector<int> &sids, int spos, const std::vector<float> &lg, int img_used) {
++        if (g_ck.empty() || spos <= 0 || (int)sids.size() < spos) return;
++        int slot = -1;
++        for (size_t i = 0; i < g_ck.size(); i++)           // 同位置 + 同前缀 ⇒ 覆盖 (幂等, 不浪费槽)
++            if (g_ck[i].valid && g_ck[i].pos == spos && std::equal(g_ck[i].ids.begin(), g_ck[i].ids.end(), sids.begin())) { slot = (int)i; break; }
++        if (slot < 0) for (size_t i = 0; i < g_ck.size(); i++) if (!g_ck[i].valid) { slot = (int)i; break; }
++        if (slot < 0) { slot = 0; for (size_t i = 1; i < g_ck.size(); i++) if (g_ck[i].last < g_ck[(size_t)slot].last) slot = (int)i; }   // LRU 淘汰
++        if (slot < 0) return;
++        Ckpt &C = g_ck[(size_t)slot];
++        C.ids.assign(sids.begin(), sids.begin() + spos);
++        C.pos = spos;
++        C.conv = g_st.conv; C.S = g_st.S; C.logits = lg;
++        C.Kc.resize(NLAYER); C.Vc.resize(NLAYER);
++        size_t nr = (size_t)spos * NKV * HD;
++        for (int l = 0; l < NLAYER; l++) {
++            if (!g_lay[l].recr) {
++                C.Kc[(size_t)l].assign(g_lay[l].Kc.begin(), g_lay[l].Kc.begin() + nr);
++                C.Vc[(size_t)l].assign(g_lay[l].Vc.begin(), g_lay[l].Vc.begin() + nr);
++            } else { std::vector<float>().swap(C.Kc[(size_t)l]); std::vector<float>().swap(C.Vc[(size_t)l]); }
++        }
++        C.img_used = img_used;
++        C.imgdep = 0;
++        if (g_img_n > 0 && g_img_pad >= 0)
++            for (int k = 0; k < spos; k++) if (C.ids[(size_t)k] == g_img_pad) { C.imgdep = g_img_id; break; }
++        C.last = ++g_ck_tick; C.valid = true;
++    };
++    // 回滚: 把检查点状态搬回 g_st/g_lay/g_img_used (KV 只搬前 pos 行, 后面的行在继续
++    // prefill 时会被逐位覆盖, 不会被读到)
++    auto ck_restore = [&](int slot, std::vector<float> &lg) {
++        Ckpt &C = g_ck[(size_t)slot];
++        g_st.conv = C.conv; g_st.S = C.S; lg = C.logits;
++        size_t nr = (size_t)C.pos * NKV * HD;
++        for (int l = 0; l < NLAYER; l++)
++            if (!g_lay[l].recr) {
++                memcpy(g_lay[l].Kc.data(), C.Kc[(size_t)l].data(), nr * 4);
++                memcpy(g_lay[l].Vc.data(), C.Vc[(size_t)l].data(), nr * 4);
++            }
++        g_img_used = C.img_used;
++        C.last = ++g_ck_tick;
++    };
++    const int im_start_id = tid.count("<|im_start|>") ? tid["<|im_start|>"] : -1;
++
+     // 一条请求的生成
+     auto run_request = [&](const std::string &prompt, int maxtok, bool stream, const std::string &sid) -> std::string {
+         std::vector<int> ids = g_tk.encode(prompt);
+@@ -1705,10 +1796,32 @@
+             restore_snap(logits); pos = g_snap.pos; reused = pos; hit = true;
+             g_img_used = g_img_n;      // ★ DETVIS: 命中快照 ⇒ 图像行早已全部消费完 (与全量 prefill 收尾状态一致)
+         }
++        // ★★ 第27轮: LCP 前缀复用 —— 在检查点表里找"本次 prompt 的最长可回滚前缀" ★★
++        //   ① 逐检查点算 LCP(本次 ids, 检查点 ids);
++        //   ② 只有 LCP == 检查点全长 (即检查点序列是本轮 prompt 的前缀) 才能回滚到它的状态;
++        //   ③ 图像依赖必须一致 (前缀含 image_pad 时指纹必须相同) —— 与 DETVIS 同源, 防"换图复读"。
++        int ck_hit = -1, ck_lcp = 0, lcp_all = 0;
++        if (!hit && !ids.empty()) {
++            for (int ci = 0; ci < (int)g_ck.size(); ci++) {
++                Ckpt &C = g_ck[(size_t)ci];
++                if (!C.valid || C.pos <= 0) continue;
++                if (!(C.imgdep == 0 || C.imgdep == ikey)) continue;
++                int m = ((int)ids.size() < C.pos) ? (int)ids.size() : C.pos;
++                int n = 0; while (n < m && C.ids[(size_t)n] == ids[(size_t)n]) n++;
++                if (n > lcp_all) lcp_all = n;                 // 真实 LCP (仅统计图像依赖相容者)
++                if (n < C.pos) continue;                      // 序列不是本轮前缀 ⇒ 状态在 C.pos, 回滚不了
++                if (n > ck_lcp) { ck_lcp = n; ck_hit = ci; }
++            }
++            if (ck_hit >= 0) {
++                ck_restore(ck_hit, logits);
++                pos = g_ck[(size_t)ck_hit].pos; reused = pos;
++                hit = (pos == (int)ids.size());
++            }
++        }
+         auto t0 = std::chrono::steady_clock::now();
+         if (!hit) {
+             int cont = -1;
+-            if (!sid.empty()) {
++            if (!sid.empty() && ck_hit < 0) {   // ★ 第27轮: 已有检查点回滚 ⇒ 不再动会话表 (状态已在正确位置)
+                 std::map<std::string, Sess>::iterator it = g_sess.find(sid);
+                 if (it != g_sess.end() && g_live_sid == sid && g_live_pos == it->second.pos &&
+                     it->second.img_id == ikey &&
+@@ -1719,12 +1832,13 @@
+                     if (ok) cont = it->second.pos;
+                 }
+             }
+-            if (cont < 0) { g_st.reset(); pos = 0; reused = 0; }
++            if (ck_hit >= 0) { /* ★ 第27轮: 状态已回滚到 ck_lcp, 不得 reset / 不得改 pos */ }
++            else if (cont < 0) { g_st.reset(); pos = 0; reused = 0; }
+             else { pos = cont; reused = cont; }
+             did_prefill = true;
+             // ★ 分块 prefill: 每个块内线性层的 gemm 合并成 m=T 一次读权重;
+             //   块 ≥ bmin 走批量路径, 剩余不足 bmin 的尾巴走原逐 token 路径 (位级不变)
+-            g_img_used = 0;                    // ★ VIS: 全量 prefill 从头按顺序取图像行
++            if (ck_hit < 0) g_img_used = 0;    // ★ VIS: 全量 prefill 从头按顺序取图像行 (回滚路径 g_img_used 由 ck_restore 恢复)
+             for (size_t i = reused; i < ids.size(); ) {
+                 if (pos >= MAXT) { ids.resize(i); break; }
+                 size_t remain = ids.size() - i;
+@@ -1733,6 +1847,13 @@
+                     T = (int)((remain > (size_t)g_bmax) ? g_bmax : remain);
+                     if (pos + T > MAXT) T = MAXT - pos;
+                 }
++                // ★ 第27轮 ①: 走到消息边界 (下一个 token = <|im_start|>) 就在该位置打检查点 ——
++                //   这是"同一个消息列表被裁成不同长度"后两轮 prompt 的分歧点, 下一次前缀延伸
++                //   能从最近的消息边界回滚。
++                if (im_start_id >= 0 && pos > 0 && ids[i] == im_start_id) ck_take(ids, pos, logits, g_img_used);
++                // ★ 第27轮 ②: 批必须在消息边界处切开, 否则边界位置不会成为任何检查点位置
++                if (im_start_id >= 0 && T > 1)
++                    for (int q = 1; q < T; q++) if (ids[i + (size_t)q] == im_start_id) { T = q; break; }
+                 if (T > 1) {
+                     forward_batch(&ids[i], T, pos, logits);
+                     if (g_ldump) { int sz = (int)logits.size(), p_ = pos + T - 1, tk = ids[i + T - 1];
+@@ -1751,8 +1872,17 @@
+         auto t1 = std::chrono::steady_clock::now();
+         double pt = std::chrono::duration<double>(t1 - t0).count();
+         if (did_prefill && reused == 0 && !ids.empty()) take_snap(ids, pos, logits, ikey);
++        // ★ 第27轮 ③: 预填充末尾检查点 (整段 prompt)。同一 prompt 重发 ⇒ 直接回滚, 0 预填充。
++        if (did_prefill && !ids.empty()) ck_take(ids, pos, logits, g_img_used);
++        {   // ★ 第27轮: 复用台账 (serve2 透出到 8090 响应与日志)
++            int newtok = (int)ids.size() - reused;
++            printf("[orn] ★ LCP=%d tok 复用, 新增 %d tok, 预填充 %.3fs (回滚点=%d tok, %s; 最长公共前缀=%d tok; 检查点表 %d/%d 槽 %.0f MB)\n",
++                   reused, newtok, pt, reused,
++                   (reused == 0 ? "无可用前缀, 全量" : (hit ? "整段命中" : "部分前缀命中")),
++                   lcp_all, ck_nvalid(), (int)g_ck.size(), ck_mb());
++        }
+         std::string out;
+-        std::vector<int> genids;
++        std::vector<int> genids, emitted;
+         int ntok = 0;
+         uint64_t fwd0 = g_fwd_n;
+         double pf0[7] = {g_p_emb, g_p_nrm, g_p_ssm, g_p_att, g_p_lay, g_p_lm, g_p_arg};
+@@ -1772,12 +1902,30 @@
+             }
+             out += tb;
+             ntok++;
++            emitted.push_back(best);            // ★ 第27轮: 记录"实际发出的 token" (供输出指纹对拍)
+             if (ntok >= maxtok) break;
+             genids.push_back(best);
+             forward(best, pos, logits); pos++;
+         }
+         auto t3 = std::chrono::steady_clock::now();
+         double gt = std::chrono::duration<double>(t3 - t2).count();
++        // ★ 第27轮 ④: 生成末尾检查点 (prompt+回答) —— 下一轮"整段重发 + 追加"只需算新增那段
++        if (!ids.empty() && pos > 0 && genids.size() > 0) {
++            std::vector<int> full(ids);
++            full.insert(full.end(), genids.begin(), genids.end());
++            if ((int)full.size() == pos) ck_take(full, pos, logits, g_img_used);
++        }
++        {   // ★ 第27轮: 输出 token 流指纹 (确定性/位级等价比对用; 不改变任何数值)
++            uint64_t h1 = 1469598103934665603ULL, h2 = 1469598103934665603ULL, h3 = 1469598103934665603ULL;
++            for (size_t i = 0; i < emitted.size(); i++) { uint64_t v = (uint64_t)(uint32_t)emitted[i];
++                for (int b = 0; b < 4; b++) { h1 ^= (unsigned char)((v >> (b * 8)) & 0xFF); h1 *= 1099511628211ULL; } }
++            for (size_t i = 0; i < out.size(); i++) { h2 ^= (unsigned char)out[i]; h2 *= 1099511628211ULL; }
++            for (size_t i = 0; i < ids.size(); i++) { uint64_t v = (uint64_t)(uint32_t)ids[i];
++                for (int b = 0; b < 4; b++) { h3 ^= (unsigned char)((v >> (b * 8)) & 0xFF); h3 *= 1099511628211ULL; } }
++            printf("[orn] ★ GEN %d tok ids=%016llx bytes=%016llx prompt=%016llx(%d tok)\n",
++                   (int)emitted.size(), (unsigned long long)h1, (unsigned long long)h2,
++                   (unsigned long long)h3, (int)ids.size());
++        }
+         if (g_prof && ntok > 0) {
+             double n = (double)ntok;
+             double e0 = (g_p_emb - pf0[0]) * 1000 / n, n0 = (g_p_nrm - pf0[1]) * 1000 / n,
