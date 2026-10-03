@@ -47,10 +47,15 @@
 
 ### 驱动下载
 
-K200 驱动和 SDK（380MB，**CentOS 发行版源码，Ubuntu 20.04 编译**，包含 XTDK/XTCL/clang++ 工具链）：
+K200 驱动和 SDK（CentOS 发行版源码，Ubuntu 20.04 编译，XTDK/XTCL 工具链）：
 
 **夸克网盘**：`/~d0fe3bEVWG~/`  
 **链接**：https://pan.quark.cn/s/3a97917a8c23
+
+**GitHub LFS 备份**（与仓库同一份，已 push）：
+`drivers/k200-drivers.tar.gz`（376MB）  
+`drivers/k200-runtime.tar.gz`（3MB）  
+`drivers/k200-sdk-clean.tar.gz`（219MB）
 
 解压后目录结构：
 ```
